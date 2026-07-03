@@ -61,12 +61,14 @@ PURVIEW_LATEST = {
 REMEDIATION_DAYS = 5            # SLA from the CrowdStrike email
 FROM_TEAM = "IT Compliance"     # appears in the message signature
 
-# Host -> user email lookup that does NOT arrive in the vendor files. Drop a
-# CMDB export into data/ named like 'CMDB_Mapping.xlsx' with these columns; it
-# fills the gap for CS-only / Mac-Purview hosts that have no assigned_to.
+# Host -> user email lookup that does NOT arrive in the vendor files. Drop the
+# CMDB export into data/ with 'cmdb' in the filename. Join key is the CMDB
+# 'Name' column (hostname). NOTE: 'Assigned to' in a CMDB is very often a
+# DISPLAY NAME, not an email - if so, see the warning the run prints and switch
+# 'email' to a real address column (or get one added to the export).
 CMDB_MAPPING = {
-    "stem": "cmdb_mapping",
-    "map": {"hostname": "Host Name", "email": "Assigned User Email"},
+    "stem": "cmdb",
+    "map": {"hostname": "Name", "email": "Assigned to"},
 }
 
 # Servers have no end user -> route to a BU admin/team address. Maintained by
@@ -185,6 +187,24 @@ def _read_xlsx_rows(path: str) -> list:
 
 def _read_any(path: str) -> list:
     return _read_xlsx_rows(path) if path.lower().endswith(".xlsx") else _read_csv_rows(path)
+
+
+def _read_headers(path: str) -> list:
+    """Just the header row, for the pre-flight column check."""
+    if path.lower().endswith(".xlsx"):
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        try:
+            headers = [cell_to_str(h) for h in next(ws.iter_rows(values_only=True))]
+        except StopIteration:
+            headers = []
+        wb.close()
+        return headers
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        try:
+            return [cell_to_str(h) for h in next(csv.reader(f))]
+        except StopIteration:
+            return []
 
 
 # ===========================================================================
@@ -357,16 +377,31 @@ def read_cmdb_mapping() -> dict:
         return {}
     stem = CMDB_MAPPING["stem"]
     m = CMDB_MAPPING["map"]
-    for f in os.listdir(DATA_DIR):
-        base = os.path.splitext(f)[0].lower()
+    for fn in os.listdir(DATA_DIR):
+        base = os.path.splitext(fn)[0].lower()
         if base.startswith(stem) or stem in base:
             out = {}
-            for raw in _read_any(os.path.join(DATA_DIR, f)):
+            n_rows = n_noat = 0
+            for raw in _read_any(os.path.join(DATA_DIR, fn)):
+                n_rows += 1
                 host = cell_to_str(raw.get(m["hostname"], "")).upper()
                 email = cell_to_str(raw.get(m["email"], ""))
-                if host and "@" in email:
+                if not host:
+                    continue
+                if "@" in email:
                     out[host] = email
+                elif email:
+                    n_noat += 1
+            print(f"CMDB mapping '{fn}': {len(out)} usable host->email "
+                  f"entr{'y' if len(out) == 1 else 'ies'} from {n_rows} row(s).")
+            if n_noat:
+                print(f"  ! {n_noat} row(s) have a '{m['email']}' value with NO '@' - "
+                      f"that column looks like display names, not email addresses.")
+                print(f"    Those hosts can't be emailed as-is. Point CMDB_MAPPING['email'] "
+                      f"at a real address column, or get one added to the export.")
             return out
+    print("No CMDB mapping file found in data/ - workstations without assigned_to "
+          "will stay unresolved.")
     return {}
 
 
@@ -550,16 +585,59 @@ def generate_mock_data() -> None:
             {"gis_bu": "AMS-Corp", "intune_computer_name": "MAC-AMS-22", "purview_configuration_status": "Not Onboarded", "purview_policy_status": "Not Applied", "purview_last_seen": "2026-06-18", "purview_last_policy_sync_time": "2026-06-10", "purview_defender_mocamp_version": "", "purview_defender_engine_version": "", "compliance": "Non-Compliant", "report_date": RD},
         ])
 
-    # CMDB hostname -> user email (the mapping the vendor files DON'T provide).
-    # WS-EMEA-014 is deliberately absent to demonstrate an UNRESOLVED finding.
+    # CMDB export: hostname ('Name') -> user. 'Assigned to' here is an email for
+    # most rows, but one row uses a display name to demonstrate the warning.
+    # WS-EMEA-014 is deliberately absent to keep one UNRESOLVED finding.
     _write_mock("CMDB_Mapping",
-        ["Host Name", "Assigned User Email"],
+        ["Name", "Serial number", "Assigned to", "Install Status", "Operating System"],
         [
-            {"Host Name": "WS-APAC-001", "Assigned User Email": "alice@example.com"},
-            {"Host Name": "WS-APAC-002", "Assigned User Email": "bob@example.com"},
-            {"Host Name": "MAC-APAC-07", "Assigned User Email": "dana@example.com"},
-            {"Host Name": "MAC-AMS-22", "Assigned User Email": "evan@example.com"},
+            {"Name": "WS-APAC-001", "Serial number": "SN-A1", "Assigned to": "alice@example.com", "Install Status": "Installed", "Operating System": "Windows 11 24H2"},
+            {"Name": "WS-APAC-002", "Serial number": "SN-A2", "Assigned to": "bob@example.com", "Install Status": "Installed", "Operating System": "Windows 11 24H2"},
+            {"Name": "MAC-APAC-07", "Serial number": "SN-A7", "Assigned to": "dana@example.com", "Install Status": "Installed", "Operating System": "macOS 14.5"},
+            {"Name": "MAC-AMS-22", "Serial number": "SN-M22", "Assigned to": "Evan Wright", "Install Status": "Installed", "Operating System": "macOS 14.4"},  # display name, not email
         ])
+
+
+# ===========================================================================
+# PRE-FLIGHT HEADER CHECK
+# Reads each file's real header row and reports, by name, any column the code
+# expects but can't find - so a renamed/mismatched column announces itself
+# instead of silently producing blank fields. Warns; never blocks the run.
+# ===========================================================================
+
+def validate_headers() -> bool:
+    print("Pre-flight header check:")
+    all_ok = True
+    skip = CMDB_MAPPING["stem"]
+    files = sorted(f for f in os.listdir(DATA_DIR) if f.lower().endswith((".xlsx", ".csv")))
+    for fname in files:
+        path = os.path.join(DATA_DIR, fname)
+        stem = os.path.splitext(fname)[0]
+        actual = _read_headers(path)
+
+        if skip in stem.lower():
+            expected, label = list(CMDB_MAPPING["map"].values()), "CMDB mapping"
+        else:
+            _, entry = _match_registry(stem)
+            if not entry:
+                print(f"  ?  {fname}: not a recognized report (it will be skipped)")
+                continue
+            expected = list(entry["map"].values())
+            label = f"{entry['meta']['source']}/{entry['meta']['kind']}"
+
+        missing = [c for c in expected if c not in actual]
+        if missing:
+            all_ok = False
+            print(f"  !  {fname} [{label}] missing column(s): {', '.join(missing)}")
+            print(f"       file actually has: {', '.join(actual) or '(no headers)'}")
+        else:
+            print(f"  OK {fname} [{label}]")
+
+    if not all_ok:
+        print("  -> Update the column name(s) in FILE_REGISTRY / CMDB_MAPPING to match")
+        print("     the 'file actually has' list above, then re-run.")
+    print()
+    return all_ok
 
 
 # ===========================================================================
@@ -576,6 +654,8 @@ def main() -> None:
     if "--regen" in sys.argv or not _data_dir_has_files():
         generate_mock_data()
         print()
+
+    validate_headers()
 
     rows = load_all()
     if not rows:
