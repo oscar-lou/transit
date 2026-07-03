@@ -235,12 +235,31 @@ def cs_issue(reason: str, agent_installed: str = "") -> tuple:
     return (f"CrowdStrike status: {reason}", "Refer to remediation guidance")
 
 
-def purview_issue(config_status: str, policy_status: str) -> tuple:
-    # NOTE: exact vocabulary of these two columns not yet confirmed. We surface
-    # both raw values and give the email's generic action; tighten once seen.
-    detail = f"config={config_status or 'n/a'}, policy={policy_status or 'n/a'}"
-    return ("Purview DLP not compliant",
-            "Check 'Purview DLP Enrollment' in Software Center; follow Onboarding/Troubleshooting deck",
+def purview_issue(config_status: str, policy_status: str, platform: str = "",
+                  mocamp: str = "", engine: str = "") -> tuple:
+    cfg = (config_status or "").strip()
+    pol = (policy_status or "").strip()
+    detail = (f"config={cfg or 'n/a'}, policy={pol or 'n/a'}, "
+              f"mocamp={mocamp or 'n/a'}, engine={engine or 'n/a'}")
+    ref = PURVIEW_LATEST.get("macos" if platform == "Mac" else "windows", {})
+    statuses = {cfg.lower(), pol.lower()}
+
+    if "notupdated" in statuses:
+        ref_txt = f"mocamp {ref.get('mocamp', '?')} / engine {ref.get('engine', '?')}"
+        return ("Microsoft Defender / Purview components not updated",
+                f"Update Defender to the reference versions ({ref_txt}); "
+                f"confirm 'Purview DLP Enrollment' in Software Center",
+                detail)
+    if not cfg and not pol:
+        # Blank telemetry across the Purview columns = host has no Purview data,
+        # i.e. it isn't onboarded / reporting to Purview DLP. This is the
+        # majority case and matches the email's Software Center enrollment step.
+        return ("Purview DLP not enrolled / not reporting",
+                "In Software Center, check 'Purview DLP Enrollment' and click "
+                "Install to enroll; follow the Onboarding / Troubleshooting deck",
+                detail)
+    return (f"Purview status: config={cfg or 'n/a'}, policy={pol or 'n/a'}",
+            "Follow the Onboarding / Troubleshooting deck",
             detail)
 
 
@@ -299,7 +318,9 @@ def normalize_file(path: str) -> list:
             if f.get("agent_version"):
                 detail += f", agent={f['agent_version']}"
         else:
-            issue, action, detail = purview_issue(f.get("config_status"), f.get("policy_status"))
+            issue, action, detail = purview_issue(
+                f.get("config_status"), f.get("policy_status"),
+                platform, f.get("mocamp_version"), f.get("engine_version"))
 
         rows.append({
             "bu": f.get("bu") or "(no BU)",
@@ -582,8 +603,8 @@ def generate_mock_data() -> None:
          "purview_defender_mocamp_version", "purview_defender_engine_version",
          "purview_configuration_status", "purview_policy_status", "compliance", "report_date"],
         [
-            {"gis_bu": "APAC-Retail", "name": "WS-APAC-001", "install_status": "Installed", "os": "Windows 11 24H2", "assigned_to": "alice@example.com", "purview_last_seen": "2026-06-25", "purview_defender_mocamp_version": "4.18.25000.1", "purview_defender_engine_version": "1.1.25000.1", "purview_configuration_status": "Misconfigured", "purview_policy_status": "Not Applied", "compliance": "Non-Compliant", "report_date": RD},
-            {"gis_bu": "EMEA-Ops", "name": "WS-EMEA-030", "install_status": "Installed", "os": "Windows 11 24H2", "assigned_to": "carol@example.com", "purview_last_seen": "2026-06-20", "purview_defender_mocamp_version": "", "purview_defender_engine_version": "", "purview_configuration_status": "Not Onboarded", "purview_policy_status": "Pending", "compliance": "Non-Compliant", "report_date": RD},
+            {"gis_bu": "APAC-Retail", "name": "WS-APAC-001", "install_status": "Installed", "os": "Windows 11 24H2", "assigned_to": "alice@example.com", "purview_last_seen": "2026-06-25", "purview_defender_mocamp_version": "4.18.25000.1", "purview_defender_engine_version": "1.1.25000.1", "purview_configuration_status": "NotUpdated", "purview_policy_status": "NotUpdated", "compliance": "Non-Compliant", "report_date": RD},
+            {"gis_bu": "EMEA-Ops", "name": "WS-EMEA-030", "install_status": "Installed", "os": "Windows 11 24H2", "assigned_to": "carol@example.com", "purview_last_seen": "", "purview_defender_mocamp_version": "4.18.25000.1", "purview_defender_engine_version": "", "purview_configuration_status": "", "purview_policy_status": "", "compliance": "Non-Compliant", "report_date": RD},
         ])
 
     _write_mock("AIAGO_Mac_Purview",
