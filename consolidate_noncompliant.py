@@ -251,7 +251,19 @@ def normalize_file(path: str) -> list:
     rows = []
     for raw in _read_any(path):
         f = {canon: cell_to_str(raw.get(col, "")) for canon, col in cmap.items()}
-        platform = meta["platform"] or _platform_from_os(f.get("os"))
+        # Platform: fixed for most files. For servers it comes from ser_os, but
+        # that column is sometimes empty while ser_sys_class_name carries the
+        # OS signal (e.g. "Citrix VDI", "Linux Server"); try os first, then
+        # fall back to sys_class so those rows aren't mislabelled "Unknown".
+        platform = meta["platform"]
+        if not platform:
+            platform = _platform_from_os(f.get("os"))
+            if platform == "Unknown":
+                platform = _platform_from_os(f.get("sys_class"))
+            if platform == "Unknown":
+                # neither column buckets to Win/Mac/Linux (e.g. "Citrix VDI");
+                # keep the most specific raw label rather than a bare "Unknown".
+                platform = f.get("os") or f.get("sys_class") or "Unknown"
         if meta["source"] == "CrowdStrike":
             issue, action = cs_issue(f.get("cs_reason"))
             detail = f"reason={f.get('cs_reason') or 'n/a'}"
@@ -513,8 +525,12 @@ def generate_mock_data() -> None:
         ["gis_bu", "ser_name", "ser_install_status", "ser_sys_class_name", "ser_os",
          "last_seen", "agent_version", "proc_agent_installed", "proc_cs_version_status", "proc_agent_reporting", "Compliance", "report_date"],
         [
+            # both columns populated -> ser_os wins ("Windows")
             {"gis_bu": "EMEA-Ops", "ser_name": "SRV-EMEA-DB01", "ser_install_status": "Installed", "ser_sys_class_name": "Server", "ser_os": "Windows Server 2022", "last_seen": "2026-05-30", "agent_version": "7.28.5", "proc_agent_installed": "yes", "proc_cs_version_status": "Outdated", "proc_agent_reporting": "yes", "Compliance": "Non-Compliant", "report_date": RD},
-            {"gis_bu": "AMS-Corp", "ser_name": "SRV-AMS-APP3", "ser_install_status": "Installed", "ser_sys_class_name": "Server", "ser_os": "Red Hat Linux 9", "last_seen": "", "agent_version": "", "proc_agent_installed": "no", "proc_cs_version_status": "Unknown", "proc_agent_reporting": "no", "Compliance": "Non-Compliant", "report_date": RD},
+            # ser_os empty, class carries OS signal -> fallback to class ("Linux")
+            {"gis_bu": "AMS-Corp", "ser_name": "SRV-AMS-APP3", "ser_install_status": "Installed", "ser_sys_class_name": "Linux Server", "ser_os": "", "last_seen": "", "agent_version": "", "proc_agent_installed": "no", "proc_cs_version_status": "Unknown", "proc_agent_reporting": "no", "Compliance": "Non-Compliant", "report_date": RD},
+            # ser_os empty, class not a Win/Mac/Linux word -> keep literal ("Citrix VDI")
+            {"gis_bu": "EMEA-Ops", "ser_name": "SRV-EMEA-VDI9", "ser_install_status": "Installed", "ser_sys_class_name": "Citrix VDI", "ser_os": "", "last_seen": "2026-06-01", "agent_version": "7.29.1", "proc_agent_installed": "yes", "proc_cs_version_status": "Outdated", "proc_agent_reporting": "yes", "Compliance": "Non-Compliant", "report_date": RD},
         ])
 
     _write_mock("AIAGO_Windows_Purview",
