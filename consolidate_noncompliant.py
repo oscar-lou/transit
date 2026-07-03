@@ -74,9 +74,13 @@ CMDB_MAPPING = {
 # DIFFERENT conventions (e.g. "Chan, Tai Man Terry" vs "Chan, Terry-TM"), so the
 # match is fuzzy - see resolve_name_to_email(). Only confident matches are used
 # to send; ambiguous ones go to a review list, never a guessed email.
+# If the sheet has separate GivenName/Surname columns, those are AUTHORITATIVE
+# and used directly (no guessing at how DisplayName is formatted). If a row
+# lacks them, we fall back to parsing DisplayName for just that row.
 AD_USERS = {
     "stem": "ad_users",
-    "map": {"name": "DisplayName", "email": "EmailAddress"},
+    "map": {"name": "DisplayName", "email": "EmailAddress",
+            "given": "GivenName", "surname": "Surname"},
 }
 
 # Manual name -> email overrides for the exceptions the fuzzy match can't get
@@ -546,8 +550,18 @@ def parse_name(name: str) -> tuple:
     return surname, given_tokens
 
 
+def name_tokens(text: str) -> set:
+    """Lowercase, split on space/hyphen/period/comma -> set of tokens.
+    Used on structured GivenName values (e.g. 'Terry' or 'Tai Man')."""
+    t = (text or "").lower().replace("-", " ").replace(".", " ").replace(",", " ")
+    return {tok for tok in t.split() if tok}
+
+
 def read_ad_users() -> dict:
-    """Build lookup structures from the AD_Users export."""
+    """Build lookup structures from the AD_Users export. Prefers the authoritative
+    Surname/GivenName columns when present; falls back to parsing DisplayName
+    only for rows where those columns are blank, so it degrades gracefully if
+    a real export happens not to carry them."""
     found = find_dataset(AD_USERS["stem"])
     if not found:
         print("No AD_Users file/sheet in data/ - names can't be resolved to emails.")
@@ -555,7 +569,7 @@ def read_ad_users() -> dict:
     path, sheet = found
     m = AD_USERS["map"]
     exact, by_surname = {}, {}
-    n = 0
+    n = n_structured = 0
     for raw in _read_any(path, sheet):
         disp = cell_to_str(raw.get(m["name"], ""))
         email = cell_to_str(raw.get(m["email"], ""))
@@ -563,11 +577,23 @@ def read_ad_users() -> dict:
             continue
         n += 1
         exact[norm_name(disp)] = email
-        surname, given = parse_name(disp)
+
+        surname_col = cell_to_str(raw.get(m.get("surname", ""), ""))
+        given_col = cell_to_str(raw.get(m.get("given", ""), ""))
+        if surname_col:
+            n_structured += 1
+            surname = surname_col.strip().lower()
+            given_tokens = name_tokens(given_col)
+        else:
+            surname, given_list = parse_name(disp)
+            given_tokens = set(given_list)
+
         by_surname.setdefault(surname, []).append(
-            {"disp": disp, "email": email, "given": set(given)})
+            {"disp": disp, "email": email, "given": given_tokens})
     where = f"{os.path.basename(path)}" + (f" [{sheet}]" if sheet else "")
-    print(f"AD_Users '{where}': {n} name->email entries.")
+    print(f"AD_Users '{where}': {n} name->email entries "
+          f"({n_structured} using Surname/GivenName columns, "
+          f"{n - n_structured} parsed from DisplayName).")
     return {"exact": exact, "by_surname": by_surname, "count": n}
 
 
@@ -826,18 +852,25 @@ def generate_mock_data() -> None:
             {"Name": "WS-APAC-002", "Serial number": "SN-A2", "Assigned to": "Wong, Siu Ming", "Install Status": "Installed", "Operating System": "Windows 11 24H2"},
             {"Name": "MAC-APAC-07", "Serial number": "SN-A7", "Assigned to": "Lee, John Xavier [External]", "Install Status": "Installed", "Operating System": "macOS 14.5"},
             {"Name": "MAC-AMS-22", "Serial number": "SN-M22", "Assigned to": "Smith, Robert", "Install Status": "Installed", "Operating System": "macOS 14.4"},
+            {"Name": "WS-EMEA-014", "Serial number": "SN-E14", "Assigned to": "Lam, Wai Lok Kelvin", "Install Status": "Installed", "Operating System": "Windows 11 24H2"},
         ])
 
     # AD directory: DisplayName -> EmailAddress. Note the shorter convention and
     # the two "Smith, Robert-*" rows that make "Smith, Robert" ambiguous.
+    # Real AD exports often carry Surname/GivenName as separate columns rather
+    # than relying on DisplayName formatting. Kelvin Lam demonstrates exactly
+    # why that matters: his DisplayName is given-name-first with NO comma, so
+    # naive parsing would misread "Kelvin" as the surname. The Surname/GivenName
+    # columns sidestep that entirely.
     _write_mock("AD_Users",
-        ["DisplayName", "EmailAddress", "Department"],
+        ["DisplayName", "Surname", "GivenName", "EmailAddress", "Department"],
         [
-            {"DisplayName": "Chan, Terry-TM", "EmailAddress": "terry.chan@example.com", "Department": "Retail"},
-            {"DisplayName": "Wong, Siu Ming", "EmailAddress": "siuming.wong@example.com", "Department": "Ops"},
-            {"DisplayName": "Lee, John-JX [External]", "EmailAddress": "john.lee@consultant.com", "Department": "Contractor"},
-            {"DisplayName": "Smith, Robert-RA", "EmailAddress": "robert.a.smith@example.com", "Department": "Finance"},
-            {"DisplayName": "Smith, Robert-RB", "EmailAddress": "robert.b.smith@example.com", "Department": "Legal"},
+            {"DisplayName": "Chan, Terry-TM", "Surname": "Chan", "GivenName": "Terry", "EmailAddress": "terry.chan@example.com", "Department": "Retail"},
+            {"DisplayName": "Wong, Siu Ming", "Surname": "Wong", "GivenName": "Siu Ming", "EmailAddress": "siuming.wong@example.com", "Department": "Ops"},
+            {"DisplayName": "Lee, John-JX [External]", "Surname": "Lee", "GivenName": "John", "EmailAddress": "john.lee@consultant.com", "Department": "Contractor"},
+            {"DisplayName": "Smith, Robert-RA", "Surname": "Smith", "GivenName": "Robert", "EmailAddress": "robert.a.smith@example.com", "Department": "Finance"},
+            {"DisplayName": "Smith, Robert-RB", "Surname": "Smith", "GivenName": "Robert", "EmailAddress": "robert.b.smith@example.com", "Department": "Legal"},
+            {"DisplayName": "Kelvin Lam", "Surname": "Lam", "GivenName": "Kelvin", "EmailAddress": "kelvin.lam@example.com", "Department": "IT"},
         ])
 
 
@@ -852,15 +885,16 @@ def validate_headers() -> bool:
     print("Pre-flight header check:")
     all_ok = True
 
-    checks = []  # (stem_keyword, expected_columns, label)
+    checks = []  # (stem_keyword, required_columns, optional_columns, label)
     for rk, entry in FILE_REGISTRY.items():
-        checks.append((rk, list(entry["map"].values()),
+        checks.append((rk, list(entry["map"].values()), [],
                         f"{entry['meta']['source']}/{entry['meta']['kind']}"))
-    checks.append((CMDB_MAPPING["stem"], list(CMDB_MAPPING["map"].values()), "CMDB"))
-    checks.append((AD_USERS["stem"], list(AD_USERS["map"].values()), "AD_Users"))
-    checks.append((OVERRIDES["stem"], list(OVERRIDES["map"].values()), "Overrides"))
+    checks.append((CMDB_MAPPING["stem"], list(CMDB_MAPPING["map"].values()), [], "CMDB"))
+    checks.append((AD_USERS["stem"], [AD_USERS["map"]["name"], AD_USERS["map"]["email"]],
+                   [AD_USERS["map"].get("surname", ""), AD_USERS["map"].get("given", "")], "AD_Users"))
+    checks.append((OVERRIDES["stem"], list(OVERRIDES["map"].values()), [], "Overrides"))
 
-    for stem_keyword, expected, label in checks:
+    for stem_keyword, required, optional, label in checks:
         found = find_dataset(stem_keyword)
         if not found:
             if label == "Overrides":
@@ -871,13 +905,15 @@ def validate_headers() -> bool:
         path, sheet = found
         actual = _read_headers(path, sheet)
         where = f"{os.path.basename(path)}" + (f" [{sheet}]" if sheet else "")
-        missing = [c for c in expected if c not in actual]
+        missing = [c for c in required if c not in actual]
+        missing_opt = [c for c in optional if c and c not in actual]
         if missing:
             all_ok = False
             print(f"  !  {where}  ({label}) missing column(s): {', '.join(missing)}")
             print(f"       actually has: {', '.join(actual) or '(no headers)'}")
         else:
-            print(f"  OK {where}  ({label})")
+            note = f"  (no {'/'.join(missing_opt)} - will parse names from DisplayName instead)" if missing_opt else ""
+            print(f"  OK {where}  ({label}){note}")
 
     if not all_ok:
         print("  -> Update the column name(s) in FILE_REGISTRY / CMDB_MAPPING / AD_USERS")
