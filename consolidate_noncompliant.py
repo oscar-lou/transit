@@ -61,15 +61,36 @@ PURVIEW_LATEST = {
 REMEDIATION_DAYS = 5            # SLA from the CrowdStrike email
 FROM_TEAM = "IT Compliance"     # appears in the message signature
 
-# Host -> user email lookup that does NOT arrive in the vendor files. Drop the
-# CMDB export into data/ with 'cmdb' in the filename. Join key is the CMDB
-# 'Name' column (hostname). NOTE: 'Assigned to' in a CMDB is very often a
-# DISPLAY NAME, not an email - if so, see the warning the run prints and switch
-# 'email' to a real address column (or get one added to the export).
+# Host -> assigned-user NAME, from the CMDB export (drop into data/, 'cmdb' in
+# the filename). Join key is 'Name' (hostname); 'Assigned to' is a DISPLAY NAME,
+# not an email - it gets resolved to an address via AD_Users below.
 CMDB_MAPPING = {
     "stem": "cmdb",
-    "map": {"hostname": "Name", "email": "Assigned to"},
+    "map": {"hostname": "Name", "name": "Assigned to"},
 }
+
+# Directory export that turns a name into an email. Drop into data/ with
+# 'ad_users' in the filename. CMDB 'Assigned to' and AD 'DisplayName' use
+# DIFFERENT conventions (e.g. "Chan, Tai Man Terry" vs "Chan, Terry-TM"), so the
+# match is fuzzy - see resolve_name_to_email(). Only confident matches are used
+# to send; ambiguous ones go to a review list, never a guessed email.
+AD_USERS = {
+    "stem": "ad_users",
+    "map": {"name": "DisplayName", "email": "EmailAddress"},
+}
+
+# Manual name -> email overrides for the exceptions the fuzzy match can't get
+# (non-standard names, externals, etc). Optional file, 'overrides' in the name.
+# These are AUTHORITATIVE: an override always wins. This is how you fix a
+# mis/less-resolved name once and have it stick.
+OVERRIDES = {
+    "stem": "overrides",
+    "map": {"name": "Name", "email": "Email"},
+}
+
+# Only these confidence levels are turned into an actual email. Anything lower
+# is held for human review rather than risking the wrong recipient.
+NOTIFY_CONFIDENCE = {"high", "medium"}
 
 # Servers have no end user -> route to a BU admin/team address. Maintained by
 # whoever owns BU routing; a missing BU means that server is reported as
@@ -170,9 +191,9 @@ def _read_csv_rows(path: str) -> list:
         return list(csv.DictReader(f))
 
 
-def _read_xlsx_rows(path: str) -> list:
+def _read_xlsx_rows(path: str, sheet: str = None) -> list:
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    ws = wb.active
+    ws = wb[sheet] if sheet else wb.active
     it = ws.iter_rows(values_only=True)
     try:
         headers = [cell_to_str(h) for h in next(it)]
@@ -188,15 +209,15 @@ def _read_xlsx_rows(path: str) -> list:
     return out
 
 
-def _read_any(path: str) -> list:
-    return _read_xlsx_rows(path) if path.lower().endswith(".xlsx") else _read_csv_rows(path)
+def _read_any(path: str, sheet: str = None) -> list:
+    return _read_xlsx_rows(path, sheet) if path.lower().endswith(".xlsx") else _read_csv_rows(path)
 
 
-def _read_headers(path: str) -> list:
+def _read_headers(path: str, sheet: str = None) -> list:
     """Just the header row, for the pre-flight column check."""
     if path.lower().endswith(".xlsx"):
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-        ws = wb.active
+        ws = wb[sheet] if sheet else wb.active
         try:
             headers = [cell_to_str(h) for h in next(ws.iter_rows(values_only=True))]
         except StopIteration:
@@ -288,16 +309,20 @@ def _platform_from_os(os_text: str) -> str:
     return "Unknown"
 
 
-def normalize_file(path: str) -> list:
-    stem = os.path.splitext(os.path.basename(path))[0]
-    rk, entry = _match_registry(stem)
+def normalize_file(path: str, sheet: str = None, registry_key: str = None) -> list:
+    stem = sheet or os.path.splitext(os.path.basename(path))[0]
+    if registry_key:
+        entry = FILE_REGISTRY[registry_key]
+    else:
+        _, entry = _match_registry(stem)
+    label_src = f"{os.path.basename(path)}" + (f" [{sheet}]" if sheet else "")
     if not entry:
-        print(f"  ! skipped (unknown report): {os.path.basename(path)}")
+        print(f"  ! skipped (unknown report): {label_src}")
         return []
 
     cmap, meta = entry["map"], entry["meta"]
     rows = []
-    for raw in _read_any(path):
+    for raw in _read_any(path, sheet):
         f = {canon: cell_to_str(raw.get(col, "")) for canon, col in cmap.items()}
         # Platform: fixed for most files. For servers it comes from ser_os, but
         # that column is sometimes empty while ser_sys_class_name carries the
@@ -335,21 +360,26 @@ def normalize_file(path: str) -> list:
             "assigned_to": f.get("assigned_to", ""),
             "compliance": f.get("compliance"),
             "report_date": f.get("report_date"),
-            "source_file": os.path.basename(path),
+            "source_file": label_src,
         })
-    print(f"  + {os.path.basename(path):32s} {len(rows):4d} rows  [{meta['source']}/{meta['kind']}]")
+    print(f"  + {label_src:40s} {len(rows):4d} rows  [{meta['source']}/{meta['kind']}]")
     return rows
 
 
 def load_all() -> list:
-    skip = CMDB_MAPPING["stem"]
-    files = sorted(f for f in os.listdir(DATA_DIR)
-                   if f.lower().endswith((".xlsx", ".csv"))
-                   and skip not in os.path.splitext(f)[0].lower())
+    """Find each of the 5 known reports, whether it's its own file or a tab
+    inside a larger multi-tab workbook (e.g. everything living in one
+    'CompliantReport(Working).xlsx'). Each report is loaded exactly once, by
+    whichever form is found first (standalone file takes priority)."""
     all_rows = []
     print(f"Reading reports from '{DATA_DIR}/':")
-    for name in files:
-        all_rows.extend(normalize_file(os.path.join(DATA_DIR, name)))
+    for rk in FILE_REGISTRY:
+        found = find_dataset(rk)
+        if not found:
+            print(f"  ! not found (file or tab): {rk}")
+            continue
+        path, sheet = found
+        all_rows.extend(normalize_file(path, sheet, registry_key=rk))
     return all_rows
 
 
@@ -401,54 +431,211 @@ def write_worklist(rows: list) -> str:
 # RECIPIENT RESOLUTION
 # ===========================================================================
 
-def read_cmdb_mapping() -> dict:
-    """hostname (UPPER) -> user email, from a CMDB export dropped into data/."""
+# ===========================================================================
+# RECIPIENT RESOLUTION   hostname -> name (CMDB) -> email (AD_Users, fuzzy)
+# ===========================================================================
+
+def _list_sheets(path: str) -> list:
+    if not path.lower().endswith(".xlsx"):
+        return [None]
+    wb = openpyxl.load_workbook(path, read_only=True)
+    names = wb.sheetnames
+    wb.close()
+    return names
+
+
+# ===========================================================================
+# DATASET LOCATOR
+# A "dataset" (a report, or CMDB, or AD_Users, or Overrides) can arrive two
+# ways: as its OWN file (data/CMDB_Mapping.xlsx), or as ONE SHEET inside a
+# larger multi-tab workbook (e.g. "CompliantReport(Working).xlsx" with a
+# 'CMDB' tab and an 'AD_Users' tab). find_dataset() checks both, by matching
+# the stem keyword against filenames first, then against sheet names inside
+# every .xlsx in data/. This is the ONLY place that needs to know which shape
+# the input actually took.
+# ===========================================================================
+
+def find_dataset(stem_keyword: str):
+    """-> (path, sheet_name_or_None) for the first match, else None."""
     if not os.path.isdir(DATA_DIR):
-        return {}
-    stem = CMDB_MAPPING["stem"]
-    m = CMDB_MAPPING["map"]
+        return None
+    key = stem_keyword.lower()
+    xlsx_files = []
     for fn in os.listdir(DATA_DIR):
+        if not fn.lower().endswith((".xlsx", ".csv")):
+            continue
+        path = os.path.join(DATA_DIR, fn)
         base = os.path.splitext(fn)[0].lower()
-        if base.startswith(stem) or stem in base:
-            out = {}
-            n_rows = n_noat = 0
-            for raw in _read_any(os.path.join(DATA_DIR, fn)):
-                n_rows += 1
-                host = cell_to_str(raw.get(m["hostname"], "")).upper()
-                email = cell_to_str(raw.get(m["email"], ""))
-                if not host:
-                    continue
-                if "@" in email:
-                    out[host] = email
-                elif email:
-                    n_noat += 1
-            print(f"CMDB mapping '{fn}': {len(out)} usable host->email "
-                  f"entr{'y' if len(out) == 1 else 'ies'} from {n_rows} row(s).")
-            if n_noat:
-                print(f"  ! {n_noat} row(s) have a '{m['email']}' value with NO '@' - "
-                      f"that column looks like display names, not email addresses.")
-                print(f"    Those hosts can't be emailed as-is. Point CMDB_MAPPING['email'] "
-                      f"at a real address column, or get one added to the export.")
-            return out
-    print("No CMDB mapping file found in data/ - workstations without assigned_to "
-          "will stay unresolved.")
-    return {}
+        # 1. filename itself matches -> standalone file, own active sheet
+        if base.startswith(key) or key in base:
+            return path, None
+        if fn.lower().endswith(".xlsx"):
+            xlsx_files.append(path)
+    # 2. no filename matched -> look for a matching TAB inside every workbook.
+    # Sheet tabs likely won't carry the "aiago_" file-prefix, so compare with
+    # that stripped, and match in either direction (key-in-sheet or
+    # sheet-in-key) since tab names are often abbreviated.
+    core_key = key.replace("_", "").replace("aiago", "")
+    for path in xlsx_files:
+        for sheet in _list_sheets(path):
+            s = (sheet or "").lower().replace(" ", "").replace("_", "")
+            if len(s) >= 3 and (core_key in s or s in core_key):
+                return path, sheet
+    return None
 
 
-def resolve_recipient(row: dict, cmdb_map: dict) -> tuple:
-    """Return (email_or_None, how)."""
+def _find_file(stem: str):
+    """Back-compat wrapper: standalone-file-only lookup (used by report loader,
+    which still assumes each report is its own file unless told otherwise)."""
+    found = find_dataset(stem)
+    if found and found[1] is None:
+        return found[0]
+    return found[0] if found else None
+
+
+def read_cmdb_mapping() -> dict:
+    """hostname (UPPER) -> assigned-user display name (raw)."""
+    found = find_dataset(CMDB_MAPPING["stem"])
+    if not found:
+        print("No CMDB file/sheet in data/ - CS-only workstations will be unresolved.")
+        return {}
+    path, sheet = found
+    m = CMDB_MAPPING["map"]
+    out = {}
+    for raw in _read_any(path, sheet):
+        host = cell_to_str(raw.get(m["hostname"], "")).upper()
+        name = cell_to_str(raw.get(m["name"], ""))
+        if host and name:
+            out[host] = name
+    where = f"{os.path.basename(path)}" + (f" [{sheet}]" if sheet else "")
+    print(f"CMDB '{where}': {len(out)} host->name entries.")
+    return out
+
+
+# --- name normalization / parsing ------------------------------------------
+
+def strip_external(name: str) -> tuple:
+    """Remove a trailing [External]-style tag; return (clean_name, is_external)."""
+    n = name or ""
+    low = n.lower()
+    ext = "[external" in low or "(external" in low
+    for tag in ("[external]", "(external)", "[external ]", "- external"):
+        idx = low.find(tag)
+        if idx != -1:
+            n = n[:idx]
+            break
+    return n.strip(" -"), ext
+
+
+def norm_name(name: str) -> str:
+    clean, _ = strip_external(name)
+    return " ".join(clean.lower().replace(".", " ").replace(",", " , ").split())
+
+
+def parse_name(name: str) -> tuple:
+    """-> (surname, [given tokens]). Splits on the first comma."""
+    clean, _ = strip_external(name)
+    clean = clean.lower()
+    if "," in clean:
+        surname, given = clean.split(",", 1)
+    else:
+        parts = clean.split()
+        surname, given = (parts[0], " ".join(parts[1:])) if parts else ("", "")
+    surname = surname.strip()
+    given_tokens = [t for t in given.replace("-", " ").replace(".", " ").split() if t]
+    return surname, given_tokens
+
+
+def read_ad_users() -> dict:
+    """Build lookup structures from the AD_Users export."""
+    found = find_dataset(AD_USERS["stem"])
+    if not found:
+        print("No AD_Users file/sheet in data/ - names can't be resolved to emails.")
+        return {"exact": {}, "by_surname": {}, "count": 0}
+    path, sheet = found
+    m = AD_USERS["map"]
+    exact, by_surname = {}, {}
+    n = 0
+    for raw in _read_any(path, sheet):
+        disp = cell_to_str(raw.get(m["name"], ""))
+        email = cell_to_str(raw.get(m["email"], ""))
+        if not disp or "@" not in email:
+            continue
+        n += 1
+        exact[norm_name(disp)] = email
+        surname, given = parse_name(disp)
+        by_surname.setdefault(surname, []).append(
+            {"disp": disp, "email": email, "given": set(given)})
+    where = f"{os.path.basename(path)}" + (f" [{sheet}]" if sheet else "")
+    print(f"AD_Users '{where}': {n} name->email entries.")
+    return {"exact": exact, "by_surname": by_surname, "count": n}
+
+
+def read_overrides() -> dict:
+    found = find_dataset(OVERRIDES["stem"])
+    if not found:
+        return {}
+    path, sheet = found
+    m = OVERRIDES["map"]
+    out = {}
+    for raw in _read_any(path, sheet):
+        name = cell_to_str(raw.get(m["name"], ""))
+        email = cell_to_str(raw.get(m["email"], ""))
+        if name and "@" in email:
+            out[norm_name(name)] = email
+    if out:
+        where = f"{os.path.basename(path)}" + (f" [{sheet}]" if sheet else "")
+        print(f"Overrides '{where}': {len(out)} manual entries.")
+    return out
+
+
+def resolve_name_to_email(name: str, ad: dict, overrides: dict) -> tuple:
+    """-> (email_or_None, method, confidence, candidate_emails).
+    Confidence: high (override/exact), medium (unique heuristic), low (review)."""
+    key = norm_name(name)
+    if key in overrides:
+        return overrides[key], "override", "high", []
+    if key in ad["exact"]:
+        return ad["exact"][key], "exact name", "high", []
+
+    surname, given = parse_name(name)
+    given = set(given)
+    candidates = ad["by_surname"].get(surname, [])
+    if not candidates:
+        return None, "no AD match (surname)", "none", []
+
+    # candidates sharing at least one given-name token (e.g. "terry")
+    shared = [c for c in candidates if given & c["given"]]
+    if len(shared) == 1:
+        return shared[0]["email"], "heuristic (surname+given)", "medium", []
+    if len(shared) > 1:
+        return None, "review: several AD names share surname+given", "low", [c["email"] for c in shared]
+    # surname matched but no given-name overlap
+    if len(candidates) == 1:
+        return None, "review: surname-only match (no given overlap)", "low", [candidates[0]["email"]]
+    return None, "review: surname matches several, no given overlap", "low", [c["email"] for c in candidates]
+
+
+def resolve_recipient(row: dict, cmdb_names: dict, ad: dict, overrides: dict) -> tuple:
+    """-> (email_or_None, how, confidence, candidate_emails)."""
     if row["kind"] == "Server":
         email = BU_TEAM_EMAIL.get(row["bu"])
         if email:
-            return email, "team (BU admin)"
-        return None, "unresolved: server, no BU team email"
+            return email, "team (BU admin)", "high", []
+        return None, "unresolved: server, no BU team email", "none", []
+
     at = (row.get("assigned_to") or "").strip()
-    if "@" in at:
-        return at, "user (assigned_to)"
-    host = (row.get("hostname") or "").strip().upper()
-    if host in cmdb_map:
-        return cmdb_map[host], "user (CMDB)"
-    return None, "unresolved: no assigned_to, not in CMDB"
+    if "@" in at:                                   # Purview sometimes has the email directly
+        return at, "user (assigned_to email)", "high", []
+
+    name = at or cmdb_names.get((row.get("hostname") or "").strip().upper(), "")
+    if not name:
+        return None, "unresolved: no assigned user (CMDB/assigned_to)", "none", []
+
+    email, method, conf, cands = resolve_name_to_email(name, ad, overrides)
+    if email and conf in NOTIFY_CONFIDENCE:
+        return email, f"user ({method})", conf, []
+    return None, f"{method}: '{name}'", conf, cands
 
 
 # ===========================================================================
@@ -484,19 +671,21 @@ def compose_teams(findings: list) -> str:
             f"See the email for full remediation steps.")
 
 
-def build_notifications(rows: list, cmdb_map: dict) -> tuple:
-    groups, unresolved = {}, []
+def build_notifications(rows: list, cmdb_names: dict, ad: dict, overrides: dict) -> tuple:
+    groups, review, unresolved = {}, [], []
     for r in rows:
-        email, how = resolve_recipient(r, cmdb_map)
-        if not email:
+        email, how, conf, cands = resolve_recipient(r, cmdb_names, ad, overrides)
+        if email:
+            g = groups.setdefault(email, {"how": how, "rows": []})
+            g["rows"].append(r)
+        elif conf == "low":                       # has a name, but uncertain -> review
+            review.append((r, how, cands))
+        else:                                     # no user / no team at all
             unresolved.append((r, how))
-            continue
-        g = groups.setdefault(email, {"how": how, "rows": []})
-        g["rows"].append(r)
-    return groups, unresolved
+    return groups, review, unresolved
 
 
-def write_notifications_preview(groups: dict, unresolved: list) -> str:
+def write_notifications_preview(groups: dict, review: list, unresolved: list) -> str:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     if not HAVE_XLSX:
         path = os.path.join(OUTPUT_DIR, "notifications_preview.csv")
@@ -520,6 +709,14 @@ def write_notifications_preview(groups: dict, unresolved: list) -> str:
         ws.append([email, g["how"], hosts, len(g["rows"]), subj, body, compose_teams(g["rows"])])
     ws.freeze_panes = "A2"
 
+    # Review: has a name, but the match was uncertain -> a human picks the right
+    # email and adds it to the overrides file. NOTHING here is emailed.
+    rv = wb.create_sheet("Review")
+    rv.append(["Hostname", "Source", "Kind", "BU", "Why held", "Possible emails (pick one -> overrides)"])
+    for r, how, cands in review:
+        rv.append([r["hostname"], r["source"], r["kind"], r["bu"], how, "  |  ".join(cands)])
+    rv.freeze_panes = "A2"
+
     ur = wb.create_sheet("Unresolved")
     ur.append(["Hostname", "Source", "Platform", "Kind", "BU", "Reason no recipient"])
     for r, how in unresolved:
@@ -529,20 +726,24 @@ def write_notifications_preview(groups: dict, unresolved: list) -> str:
     return path
 
 
-def print_notify_summary(groups: dict, unresolved: list, cmdb_map: dict) -> None:
+def print_notify_summary(groups: dict, review: list, unresolved: list) -> None:
     by_how = {}
     for g in groups.values():
         by_how[g["how"]] = by_how.get(g["how"], 0) + 1
     print("\n" + "#" * 72)
-    print(f"# {len(groups)} recipient(s) to notify   |   {len(unresolved)} finding(s) UNRESOLVED")
-    print(f"# CMDB mapping entries loaded: {len(cmdb_map)}")
+    print(f"# {len(groups)} recipient(s) to notify   |   "
+          f"{len(review)} finding(s) HELD FOR REVIEW   |   {len(unresolved)} UNRESOLVED")
     print("#" * 72)
     for how, n in sorted(by_how.items()):
-        print(f"  {n:3d} recipient(s) resolved by {how}")
+        print(f"  {n:3d} recipient(s) via {how}")
+    if review:
+        print("\n  HELD FOR REVIEW (uncertain name match - not emailed):")
+        for r, how, cands in review:
+            print(f"    - {r['hostname']:16s} {how}")
     if unresolved:
-        print("\n  UNRESOLVED (no recipient - need CMDB mapping or a BU team email):")
+        print("\n  UNRESOLVED (no user/team):")
         for r, how in unresolved:
-            print(f"    - {r['hostname']:16s} {r['source']:11s} {r['kind']:11s} {r['bu']:12s}  [{how}]")
+            print(f"    - {r['hostname']:16s} {r['kind']:11s} {r['bu']:12s} [{how}]")
 
 
 # ===========================================================================
@@ -603,7 +804,7 @@ def generate_mock_data() -> None:
          "purview_defender_mocamp_version", "purview_defender_engine_version",
          "purview_configuration_status", "purview_policy_status", "compliance", "report_date"],
         [
-            {"gis_bu": "APAC-Retail", "name": "WS-APAC-001", "install_status": "Installed", "os": "Windows 11 24H2", "assigned_to": "alice@example.com", "purview_last_seen": "2026-06-25", "purview_defender_mocamp_version": "4.18.25000.1", "purview_defender_engine_version": "1.1.25000.1", "purview_configuration_status": "NotUpdated", "purview_policy_status": "NotUpdated", "compliance": "Non-Compliant", "report_date": RD},
+            {"gis_bu": "APAC-Retail", "name": "WS-APAC-001", "install_status": "Installed", "os": "Windows 11 24H2", "assigned_to": "Chan, Tai Man Terry", "purview_last_seen": "2026-06-25", "purview_defender_mocamp_version": "4.18.25000.1", "purview_defender_engine_version": "1.1.25000.1", "purview_configuration_status": "NotUpdated", "purview_policy_status": "NotUpdated", "compliance": "Non-Compliant", "report_date": RD},
             {"gis_bu": "EMEA-Ops", "name": "WS-EMEA-030", "install_status": "Installed", "os": "Windows 11 24H2", "assigned_to": "carol@example.com", "purview_last_seen": "", "purview_defender_mocamp_version": "4.18.25000.1", "purview_defender_engine_version": "", "purview_configuration_status": "", "purview_policy_status": "", "compliance": "Non-Compliant", "report_date": RD},
         ])
 
@@ -615,16 +816,28 @@ def generate_mock_data() -> None:
             {"gis_bu": "AMS-Corp", "intune_computer_name": "MAC-AMS-22", "purview_configuration_status": "Not Onboarded", "purview_policy_status": "Not Applied", "purview_last_seen": "2026-06-18", "purview_last_policy_sync_time": "2026-06-10", "purview_defender_mocamp_version": "", "purview_defender_engine_version": "", "compliance": "Non-Compliant", "report_date": RD},
         ])
 
-    # CMDB export: hostname ('Name') -> user. 'Assigned to' here is an email for
-    # most rows, but one row uses a display name to demonstrate the warning.
-    # WS-EMEA-014 is deliberately absent to keep one UNRESOLVED finding.
+    # CMDB export: hostname ('Name') -> assigned user DISPLAY NAME ('Assigned to').
+    # Names use the fuller convention; AD_Users below uses the shorter one.
+    # WS-EMEA-014 absent -> stays unresolved.
     _write_mock("CMDB_Mapping",
         ["Name", "Serial number", "Assigned to", "Install Status", "Operating System"],
         [
-            {"Name": "WS-APAC-001", "Serial number": "SN-A1", "Assigned to": "alice@example.com", "Install Status": "Installed", "Operating System": "Windows 11 24H2"},
-            {"Name": "WS-APAC-002", "Serial number": "SN-A2", "Assigned to": "bob@example.com", "Install Status": "Installed", "Operating System": "Windows 11 24H2"},
-            {"Name": "MAC-APAC-07", "Serial number": "SN-A7", "Assigned to": "dana@example.com", "Install Status": "Installed", "Operating System": "macOS 14.5"},
-            {"Name": "MAC-AMS-22", "Serial number": "SN-M22", "Assigned to": "Evan Wright", "Install Status": "Installed", "Operating System": "macOS 14.4"},  # display name, not email
+            {"Name": "WS-APAC-001", "Serial number": "SN-A1", "Assigned to": "Chan, Tai Man Terry", "Install Status": "Installed", "Operating System": "Windows 11 24H2"},
+            {"Name": "WS-APAC-002", "Serial number": "SN-A2", "Assigned to": "Wong, Siu Ming", "Install Status": "Installed", "Operating System": "Windows 11 24H2"},
+            {"Name": "MAC-APAC-07", "Serial number": "SN-A7", "Assigned to": "Lee, John Xavier [External]", "Install Status": "Installed", "Operating System": "macOS 14.5"},
+            {"Name": "MAC-AMS-22", "Serial number": "SN-M22", "Assigned to": "Smith, Robert", "Install Status": "Installed", "Operating System": "macOS 14.4"},
+        ])
+
+    # AD directory: DisplayName -> EmailAddress. Note the shorter convention and
+    # the two "Smith, Robert-*" rows that make "Smith, Robert" ambiguous.
+    _write_mock("AD_Users",
+        ["DisplayName", "EmailAddress", "Department"],
+        [
+            {"DisplayName": "Chan, Terry-TM", "EmailAddress": "terry.chan@example.com", "Department": "Retail"},
+            {"DisplayName": "Wong, Siu Ming", "EmailAddress": "siuming.wong@example.com", "Department": "Ops"},
+            {"DisplayName": "Lee, John-JX [External]", "EmailAddress": "john.lee@consultant.com", "Department": "Contractor"},
+            {"DisplayName": "Smith, Robert-RA", "EmailAddress": "robert.a.smith@example.com", "Department": "Finance"},
+            {"DisplayName": "Smith, Robert-RB", "EmailAddress": "robert.b.smith@example.com", "Department": "Legal"},
         ])
 
 
@@ -638,34 +851,37 @@ def generate_mock_data() -> None:
 def validate_headers() -> bool:
     print("Pre-flight header check:")
     all_ok = True
-    skip = CMDB_MAPPING["stem"]
-    files = sorted(f for f in os.listdir(DATA_DIR) if f.lower().endswith((".xlsx", ".csv")))
-    for fname in files:
-        path = os.path.join(DATA_DIR, fname)
-        stem = os.path.splitext(fname)[0]
-        actual = _read_headers(path)
 
-        if skip in stem.lower():
-            expected, label = list(CMDB_MAPPING["map"].values()), "CMDB mapping"
-        else:
-            _, entry = _match_registry(stem)
-            if not entry:
-                print(f"  ?  {fname}: not a recognized report (it will be skipped)")
-                continue
-            expected = list(entry["map"].values())
-            label = f"{entry['meta']['source']}/{entry['meta']['kind']}"
+    checks = []  # (stem_keyword, expected_columns, label)
+    for rk, entry in FILE_REGISTRY.items():
+        checks.append((rk, list(entry["map"].values()),
+                        f"{entry['meta']['source']}/{entry['meta']['kind']}"))
+    checks.append((CMDB_MAPPING["stem"], list(CMDB_MAPPING["map"].values()), "CMDB"))
+    checks.append((AD_USERS["stem"], list(AD_USERS["map"].values()), "AD_Users"))
+    checks.append((OVERRIDES["stem"], list(OVERRIDES["map"].values()), "Overrides"))
 
+    for stem_keyword, expected, label in checks:
+        found = find_dataset(stem_keyword)
+        if not found:
+            if label == "Overrides":
+                continue  # optional file, silently skip if absent
+            all_ok = False
+            print(f"  !  {label}: no matching file or sheet found in '{DATA_DIR}/'")
+            continue
+        path, sheet = found
+        actual = _read_headers(path, sheet)
+        where = f"{os.path.basename(path)}" + (f" [{sheet}]" if sheet else "")
         missing = [c for c in expected if c not in actual]
         if missing:
             all_ok = False
-            print(f"  !  {fname} [{label}] missing column(s): {', '.join(missing)}")
-            print(f"       file actually has: {', '.join(actual) or '(no headers)'}")
+            print(f"  !  {where}  ({label}) missing column(s): {', '.join(missing)}")
+            print(f"       actually has: {', '.join(actual) or '(no headers)'}")
         else:
-            print(f"  OK {fname} [{label}]")
+            print(f"  OK {where}  ({label})")
 
     if not all_ok:
-        print("  -> Update the column name(s) in FILE_REGISTRY / CMDB_MAPPING to match")
-        print("     the 'file actually has' list above, then re-run.")
+        print("  -> Update the column name(s) in FILE_REGISTRY / CMDB_MAPPING / AD_USERS")
+        print("     to match the 'file actually has' list above, then re-run.")
     print()
     return all_ok
 
@@ -694,10 +910,12 @@ def main() -> None:
 
     worklist = write_worklist(rows)
 
-    cmdb_map = read_cmdb_mapping()
-    groups, unresolved = build_notifications(rows, cmdb_map)
-    preview = write_notifications_preview(groups, unresolved)
-    print_notify_summary(groups, unresolved, cmdb_map)
+    cmdb_names = read_cmdb_mapping()
+    ad = read_ad_users()
+    overrides = read_overrides()
+    groups, review, unresolved = build_notifications(rows, cmdb_names, ad, overrides)
+    preview = write_notifications_preview(groups, review, unresolved)
+    print_notify_summary(groups, review, unresolved)
 
     print(f"\nConsolidated worklist   -> {worklist}")
     print(f"Notification preview    -> {preview}   (NOTHING SENT)")
