@@ -189,6 +189,34 @@ FILE_REGISTRY = {
                     "purview_defender_mocamp_version", "purview_defender_engine_version",
                     "compliance", "report_date"],
     },
+    # Zscaler App (client connector) deployment - NOT covered by any of the
+    # other 4 reports, unlike the sibling 'Crowdstrike'/'DLP' CSV exports
+    # (same filename family) which turned out to be ~95% the same hosts as
+    # aiago_*_cs / aiago_*_purview above, just a fuller unfiltered export of
+    # the identical CrowdStrike/Purview checks - adding those as separate
+    # entries would double-count and double-email those hosts, so they're
+    # deliberately left out. This export lists EVERY device (compliant and
+    # not) rather than being pre-filtered, so zapp_issue() gates on
+    # 'compliant' itself - see the comment there.
+    "zapp": {
+        "meta": {"source": "Zapp", "platform": None, "kind": "Workstation"},
+        "map": {
+            "bu": "business_unit_code", "hostname": "hostname", "install_status": "install_status",
+            "os": "os", "sys_class": "sys_class_name", "assigned_to": "assigned_to",
+            "last_seen": "last_seen_connected_to_zia",
+            "zapp_installed": "zapp_installed", "zapp_missing": "zapp_missing",
+            "zapp_version": "zapp_version",
+            "compliance": "compliant", "report_date": "report_date",
+        },
+        "columns": ["hostname", "business_unit_code", "zapp", "zapp_required", "zapp_whitelist_bu",
+                    "manufacturer", "chassis_type", "model_id", "serial_number", "company",
+                    "assigned_to_company", "assigned_to", "install_status", "os", "sys_class_name",
+                    "last_discovered", "virtual", "zapp_version", "zapp_user",
+                    "last_seen_connected_to_zia", "registration_timestamp", "report_date",
+                    "policy_name", "device_state", "last_seen_with_client_connector_active",
+                    "zapp_installed", "zapp_missing", "host_name", "compliant", "ageing_30_days",
+                    "ageing_60_days", "ageing_90_days", "run_at"],
+    },
 }
 
 CANON_COLUMNS = [
@@ -332,6 +360,23 @@ def purview_issue(config_status: str, policy_status: str, platform: str = "",
             detail)
 
 
+def zapp_issue(compliant: str, zapp_installed: str, zapp_missing: str):
+    """-> (issue, action) or None. Unlike the CrowdStrike/Purview exports
+    (pre-filtered to non-compliant rows upstream), the Zapp export lists
+    EVERY device with a boolean 'compliant' flag, so this is the one source
+    that has to gate on it itself - otherwise every already-compliant
+    device would get reported as a finding too."""
+    c = (compliant or "").strip().lower()
+    if c not in ("0", "false", "no"):
+        return None
+    if (zapp_missing or "").strip().lower() in ("1", "true", "yes") or \
+       (zapp_installed or "").strip().lower() in ("0", "false", "no"):
+        return ("Zapp (Zscaler Client Connector) not installed",
+                "Install Zapp from Software Center; confirm it registers and connects to ZIA")
+    return ("Zapp reporting non-compliant",
+            "Verify Zapp registration/connectivity; refer to remediation guidance")
+
+
 # ===========================================================================
 # LOAD + NORMALIZE
 # ===========================================================================
@@ -390,6 +435,14 @@ def normalize_file(path: str, sheet: str = None, registry_key: str = None) -> li
             detail = f"reason={f.get('cs_reason') or 'n/a'}, installed={f.get('agent_installed') or 'n/a'}"
             if f.get("agent_version"):
                 detail += f", agent={f['agent_version']}"
+        elif meta["source"] == "Zapp":
+            result = zapp_issue(f.get("compliance"), f.get("zapp_installed"), f.get("zapp_missing"))
+            if result is None:
+                continue  # compliant device in a full (unfiltered) export - not a finding
+            issue, action = result
+            detail = (f"installed={f.get('zapp_installed') or 'n/a'}, "
+                      f"missing={f.get('zapp_missing') or 'n/a'}, "
+                      f"version={f.get('zapp_version') or 'n/a'}")
         else:
             issue, action, detail = purview_issue(
                 f.get("config_status"), f.get("policy_status"),
@@ -435,11 +488,14 @@ def load_all() -> list:
 # CONSOLIDATED WORKLIST OUTPUT
 # ===========================================================================
 
+SOURCE_KINDS = ["CrowdStrike", "Purview", "Zapp"]  # summary columns in write_worklist()
+
+
 def summarize_by_bu(rows: list) -> dict:
     bus = {}
     for r in rows:
-        b = bus.setdefault(r["bu"], {"total": 0, "CrowdStrike": 0, "Purview": 0,
-                                     "Workstation": 0, "Server": 0})
+        b = bus.setdefault(r["bu"], {"total": 0, "Workstation": 0, "Server": 0,
+                                     **{s: 0 for s in SOURCE_KINDS}})
         b["total"] += 1
         b[r["source"]] = b.get(r["source"], 0) + 1
         b[r["kind"]] = b.get(r["kind"], 0) + 1
@@ -467,9 +523,9 @@ def write_worklist(rows: list) -> str:
     ws.freeze_panes = "A2"
 
     summary = wb.create_sheet("BU Summary")
-    summary.append(["Business Unit", "Total", "CrowdStrike", "Purview", "Workstation", "Server"])
+    summary.append(["Business Unit", "Total"] + SOURCE_KINDS + ["Workstation", "Server"])
     for bu, s in summarize_by_bu(rows).items():
-        summary.append([bu, s["total"], s["CrowdStrike"], s["Purview"], s["Workstation"], s["Server"]])
+        summary.append([bu, s["total"]] + [s[k] for k in SOURCE_KINDS] + [s["Workstation"], s["Server"]])
     summary.freeze_panes = "A2"
     wb.save(path)
     return path
@@ -911,6 +967,20 @@ def generate_mock_data() -> None:
     _write_mock("AIAGO_Mac_Purview", FILE_REGISTRY["aiago_mac_purview"]["columns"],
         [
             {"gis_bu": "AMS-Corp", "intune_computer_name": "MAC-AMS-22", "purview_configuration_status": "Not Onboarded", "purview_policy_status": "Not Applied", "purview_last_seen": "2026-06-18", "purview_last_policy_sync_time": "2026-06-10", "purview_defender_mocamp_version": "", "purview_defender_engine_version": "", "compliance": "Non-Compliant", "report_date": RD},
+        ])
+
+    _write_mock("Zapp_Deployment", FILE_REGISTRY["zapp"]["columns"],
+        [
+            # not compliant, client missing entirely -> a finding
+            {"hostname": "WS-APAC-001", "business_unit_code": "APAC-Retail", "zapp": "FALSE",
+             "assigned_to": "Terry Chan", "install_status": "Installed", "os": "Windows 11 24H2",
+             "sys_class_name": "Computer", "zapp_installed": "0", "zapp_missing": "1",
+             "compliant": "0", "report_date": RD},
+            # compliant device in this UNFILTERED export -> must be skipped, not emailed
+            {"hostname": "WS-EMEA-030", "business_unit_code": "EMEA-Ops", "zapp": "TRUE",
+             "assigned_to": "carol@example.com", "install_status": "Installed", "os": "Windows 11 24H2",
+             "sys_class_name": "Computer", "zapp_installed": "1", "zapp_missing": "0",
+             "compliant": "1", "report_date": RD},
         ])
 
     # CMDB export: hostname ('Name') -> assigned user DISPLAY NAME ('Assigned to').
