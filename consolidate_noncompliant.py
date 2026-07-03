@@ -94,6 +94,7 @@ FILE_REGISTRY = {
         "map": {
             "bu": "gis_bu", "hostname": "hostname", "install_status": "install_status",
             "os": "os", "last_seen": "last_seen", "agent_version": "agent_version",
+            "agent_installed": "proc_agent_installed",
             "cs_reason": "proc_cs_version_status",
             "compliance": "Compliance", "report_date": "report_date",
         },
@@ -102,7 +103,8 @@ FILE_REGISTRY = {
         "meta": {"source": "CrowdStrike", "platform": "Mac", "kind": "Workstation"},
         "map": {
             "bu": "BU", "hostname": "computer_name", "os": "os_version",
-            "last_seen": "last_seen", "cs_reason": "proc_cs_version_status",
+            "last_seen": "last_seen", "agent_installed": "proc_agent_installed",
+            "cs_reason": "proc_cs_version_status",
             "compliance": "Compliance", "report_date": "report_date",
         },
     },
@@ -111,7 +113,8 @@ FILE_REGISTRY = {
         "map": {
             "bu": "gis_bu", "hostname": "ser_name", "install_status": "ser_install_status",
             "sys_class": "ser_sys_class_name", "os": "ser_os", "last_seen": "last_seen",
-            "agent_version": "agent_version", "cs_reason": "proc_cs_version_status",
+            "agent_version": "agent_version", "agent_installed": "proc_agent_installed",
+            "cs_reason": "proc_cs_version_status",
             "compliance": "Compliance", "report_date": "report_date",
         },
     },
@@ -211,9 +214,12 @@ def _read_headers(path: str) -> list:
 # REASON -> ISSUE + ACTION
 # ===========================================================================
 
-def cs_issue(reason: str) -> tuple:
+def cs_issue(reason: str, agent_installed: str = "") -> tuple:
+    inst = (agent_installed or "").strip().lower()
     r = (reason or "").strip().lower()
-    if r == "unknown":
+    # 'agent not installed' is the authoritative signal: some files (Workstation)
+    # leave the reason blank for agent-less hosts instead of writing "Unknown".
+    if inst == "no" or r == "unknown":
         return ("CrowdStrike agent not installed",
                 "Install the CrowdStrike sensor (latest from the Prod share)")
     if r == "outdated":
@@ -223,6 +229,9 @@ def cs_issue(reason: str) -> tuple:
     if r == "latest":
         return ("Agent current but NOT reporting",
                 "Check network connectivity / power the machine on so it reports")
+    if not r:
+        return ("CrowdStrike status not reported",
+                "Verify agent status on the host; refer to remediation guidance")
     return (f"CrowdStrike status: {reason}", "Refer to remediation guidance")
 
 
@@ -285,8 +294,8 @@ def normalize_file(path: str) -> list:
                 # keep the most specific raw label rather than a bare "Unknown".
                 platform = f.get("os") or f.get("sys_class") or "Unknown"
         if meta["source"] == "CrowdStrike":
-            issue, action = cs_issue(f.get("cs_reason"))
-            detail = f"reason={f.get('cs_reason') or 'n/a'}"
+            issue, action = cs_issue(f.get("cs_reason"), f.get("agent_installed"))
+            detail = f"reason={f.get('cs_reason') or 'n/a'}, installed={f.get('agent_installed') or 'n/a'}"
             if f.get("agent_version"):
                 detail += f", agent={f['agent_version']}"
         else:
@@ -544,7 +553,7 @@ def generate_mock_data() -> None:
          "proc_agent_installed", "proc_cs_version_status", "proc_agent_reporting", "Compliance", "report_date"],
         [
             {"gis_bu": "APAC-Retail", "hostname": "WS-APAC-001", "install_status": "Installed", "os": "Windows 11 24H2", "last_seen": "2026-05-20", "agent_version": "7.30.10", "proc_agent_installed": "yes", "proc_cs_version_status": "Outdated", "proc_agent_reporting": "yes", "Compliance": "Non-Compliant", "report_date": RD},
-            {"gis_bu": "APAC-Retail", "hostname": "WS-APAC-002", "install_status": "Installed", "os": "Windows 11 24H2", "last_seen": "", "agent_version": "", "proc_agent_installed": "no", "proc_cs_version_status": "Unknown", "proc_agent_reporting": "no", "Compliance": "Non-Compliant", "report_date": RD},
+            {"gis_bu": "APAC-Retail", "hostname": "WS-APAC-002", "install_status": "Installed", "os": "Windows 11 24H2", "last_seen": "", "agent_version": "", "proc_agent_installed": "no", "proc_cs_version_status": "", "proc_agent_reporting": "no", "Compliance": "Non-Compliant", "report_date": RD},
             {"gis_bu": "EMEA-Ops", "hostname": "WS-EMEA-014", "install_status": "Installed", "os": "Windows 11 24H2", "last_seen": "2026-06-28", "agent_version": "7.35.20709", "proc_agent_installed": "yes", "proc_cs_version_status": "Latest", "proc_agent_reporting": "no", "Compliance": "Non-Compliant", "report_date": RD},
         ])
 
