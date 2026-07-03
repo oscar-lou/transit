@@ -99,10 +99,12 @@ NOTIFY_CONFIDENCE = {"high", "medium"}
 # Servers have no end user -> route to a BU admin/team address. Maintained by
 # whoever owns BU routing; a missing BU means that server is reported as
 # UNRESOLVED rather than mis-sent. Fill in real addresses.
+# All AIAGO server/workstation rows currently carry gis_bu = "AIAGO" (a single
+# BU code, not the APAC-Retail/EMEA-Ops/AMS-Corp examples this dict used to
+# have) - every one of the 68 real server rows was going UNRESOLVED because
+# "AIAGO" had no entry. Put the real server-team distro list here.
 BU_TEAM_EMAIL = {
-    "APAC-Retail": "apac-it@example.com",
-    "EMEA-Ops": "emea-it@example.com",
-    "AMS-Corp": "ams-it@example.com",
+    "AIAGO": "REPLACE-WITH-REAL-SERVER-TEAM-EMAIL@aia.com",
 }
 
 
@@ -113,6 +115,10 @@ BU_TEAM_EMAIL = {
 # entry, nothing else changes. Matching is by filename stem, case-insensitive.
 # ===========================================================================
 
+# "columns": the exact real header order for that report. Used only to
+# self-heal a corrupted header cell (a real export had column 8's name
+# replaced with the literal number 0) - see _heal_headers(). Also doubles as
+# the header row generate_mock_data() writes, so mock and prod can't drift.
 FILE_REGISTRY = {
     "aiago_workstation_cs": {
         "meta": {"source": "CrowdStrike", "platform": "Windows", "kind": "Workstation"},
@@ -123,6 +129,9 @@ FILE_REGISTRY = {
             "cs_reason": "proc_cs_version_status",
             "compliance": "Compliance", "report_date": "report_date",
         },
+        "columns": ["gis_bu", "hostname", "install_status", "os", "last_seen", "agent_version",
+                    "proc_agent_installed", "proc_cs_version_status", "proc_agent_reporting",
+                    "Compliance", "report_date"],
     },
     "aiago_mac_cs": {
         "meta": {"source": "CrowdStrike", "platform": "Mac", "kind": "Workstation"},
@@ -132,6 +141,8 @@ FILE_REGISTRY = {
             "cs_reason": "proc_cs_version_status",
             "compliance": "Compliance", "report_date": "report_date",
         },
+        "columns": ["BU", "computer_name", "os_version", "proc_agent_installed", "last_seen",
+                    "proc_cs_version_status", "proc_agent_reporting", "Compliance", "report_date"],
     },
     "aiago_server_cs": {
         "meta": {"source": "CrowdStrike", "platform": None, "kind": "Server"},  # platform from ser_os
@@ -142,6 +153,9 @@ FILE_REGISTRY = {
             "cs_reason": "proc_cs_version_status",
             "compliance": "Compliance", "report_date": "report_date",
         },
+        "columns": ["gis_bu", "ser_name", "ser_install_status", "ser_sys_class_name", "ser_os",
+                    "last_seen", "agent_version", "proc_agent_installed", "proc_cs_version_status",
+                    "proc_agent_reporting", "Compliance", "report_date"],
     },
     "aiago_windows_purview": {
         "meta": {"source": "Purview", "platform": "Windows", "kind": "Workstation"},
@@ -154,6 +168,10 @@ FILE_REGISTRY = {
             "policy_status": "purview_policy_status",
             "compliance": "compliance", "report_date": "report_date",
         },
+        "columns": ["gis_bu", "name", "install_status", "os", "assigned_to", "purview_last_seen",
+                    "purview_defender_mocamp_version", "purview_defender_engine_version",
+                    "purview_configuration_status", "purview_policy_status", "compliance",
+                    "report_date"],
     },
     "aiago_mac_purview": {
         "meta": {"source": "Purview", "platform": "Mac", "kind": "Workstation"},
@@ -166,6 +184,10 @@ FILE_REGISTRY = {
             "policy_status": "purview_policy_status",
             "compliance": "compliance", "report_date": "report_date",
         },
+        "columns": ["gis_bu", "intune_computer_name", "purview_configuration_status",
+                    "purview_policy_status", "purview_last_seen", "purview_last_policy_sync_time",
+                    "purview_defender_mocamp_version", "purview_defender_engine_version",
+                    "compliance", "report_date"],
     },
 }
 
@@ -195,7 +217,26 @@ def _read_csv_rows(path: str) -> list:
         return list(csv.DictReader(f))
 
 
-def _read_xlsx_rows(path: str, sheet: str = None) -> list:
+def _heal_headers(headers: list, expected: list, where: str = "") -> list:
+    """Recover a header that got clobbered at the source (seen in the wild:
+    'proc_cs_version_status' exported as the literal number 0). Only heals a
+    slot when the actual name doesn't match ANY expected column (so a real
+    rename is never touched) and the expected name is otherwise missing
+    entirely from the row (so a genuine reorder is never misaligned)."""
+    if not expected or len(headers) != len(expected):
+        return headers
+    healed = list(headers)
+    changed = False
+    for i, exp in enumerate(expected):
+        if headers[i] != exp and headers[i] not in expected and exp not in headers:
+            healed[i] = exp
+            changed = True
+            print(f"  ! header self-heal {where}: column {i} read as {headers[i]!r}; "
+                  f"expected file layout says {exp!r} - using that")
+    return healed if changed else headers
+
+
+def _read_xlsx_rows(path: str, sheet: str = None, expected_headers: list = None) -> list:
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb[sheet] if sheet else wb.active
     it = ws.iter_rows(values_only=True)
@@ -204,6 +245,7 @@ def _read_xlsx_rows(path: str, sheet: str = None) -> list:
     except StopIteration:
         wb.close()
         return []
+    headers = _heal_headers(headers, expected_headers, where=os.path.basename(path))
     out = []
     for row in it:
         if row is None or all(c is None for c in row):
@@ -213,11 +255,13 @@ def _read_xlsx_rows(path: str, sheet: str = None) -> list:
     return out
 
 
-def _read_any(path: str, sheet: str = None) -> list:
-    return _read_xlsx_rows(path, sheet) if path.lower().endswith(".xlsx") else _read_csv_rows(path)
+def _read_any(path: str, sheet: str = None, expected_headers: list = None) -> list:
+    if path.lower().endswith(".xlsx"):
+        return _read_xlsx_rows(path, sheet, expected_headers)
+    return _read_csv_rows(path)
 
 
-def _read_headers(path: str, sheet: str = None) -> list:
+def _read_headers(path: str, sheet: str = None, expected_headers: list = None) -> list:
     """Just the header row, for the pre-flight column check."""
     if path.lower().endswith(".xlsx"):
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
@@ -227,7 +271,7 @@ def _read_headers(path: str, sheet: str = None) -> list:
         except StopIteration:
             headers = []
         wb.close()
-        return headers
+        return _heal_headers(headers, expected_headers, where=os.path.basename(path))
     with open(path, newline="", encoding="utf-8-sig") as f:
         try:
             return [cell_to_str(h) for h in next(csv.reader(f))]
@@ -326,7 +370,7 @@ def normalize_file(path: str, sheet: str = None, registry_key: str = None) -> li
 
     cmap, meta = entry["map"], entry["meta"]
     rows = []
-    for raw in _read_any(path, sheet):
+    for raw in _read_any(path, sheet, expected_headers=entry.get("columns")):
         f = {canon: cell_to_str(raw.get(col, "")) for canon, col in cmap.items()}
         # Platform: fixed for most files. For servers it comes from ser_os, but
         # that column is sometimes empty while ser_sys_class_name carries the
@@ -536,18 +580,41 @@ def norm_name(name: str) -> str:
     return " ".join(clean.lower().replace(".", " ").replace(",", " , ").split())
 
 
-def parse_name(name: str) -> tuple:
-    """-> (surname, [given tokens]). Splits on the first comma."""
+def parse_name_variants(name: str) -> list:
+    """-> list of (surname, [given tokens]) candidate parses, most likely first.
+    A comma is unambiguous: 'Surname, Given...'. Without one we can't tell
+    which side is the surname - CMDB's 'Assigned to'/'Owner' writes
+    'Given [Middle] Surname' (e.g. 'Michele De Filippo', surname = 'De
+    Filippo'), so try every trailing chunk as a (possibly multi-word)
+    surname, shortest first, plus the legacy single-word-prefix reading as a
+    last resort. Caller tries each until one resolves against AD."""
     clean, _ = strip_external(name)
     clean = clean.lower()
     if "," in clean:
         surname, given = clean.split(",", 1)
-    else:
-        parts = clean.split()
-        surname, given = (parts[0], " ".join(parts[1:])) if parts else ("", "")
-    surname = surname.strip()
-    given_tokens = [t for t in given.replace("-", " ").replace(".", " ").split() if t]
-    return surname, given_tokens
+        given_tokens = [t for t in given.replace("-", " ").replace(".", " ").split() if t]
+        return [(surname.strip(), given_tokens)]
+
+    parts = [t for t in clean.replace("-", " ").replace(".", " ").split() if t]
+    if len(parts) <= 1:
+        return [(parts[0] if parts else "", [])]
+
+    variants = [(" ".join(parts[len(parts) - k:]), tuple(parts[:len(parts) - k]))
+                for k in range(1, len(parts))]
+    variants.append((parts[0], tuple(parts[1:])))  # legacy 'Surname Given...' fallback
+    seen, out = set(), []
+    for surname, given_tuple in variants:
+        v = (surname, given_tuple)
+        if v not in seen:
+            seen.add(v)
+            out.append((surname, list(given_tuple)))
+    return out
+
+
+def parse_name(name: str) -> tuple:
+    """-> (surname, [given tokens]), single best-guess parse. See
+    parse_name_variants() for callers that need to try multiple readings."""
+    return parse_name_variants(name)[0]
 
 
 def name_tokens(text: str) -> set:
@@ -624,22 +691,36 @@ def resolve_name_to_email(name: str, ad: dict, overrides: dict) -> tuple:
     if key in ad["exact"]:
         return ad["exact"][key], "exact name", "high", []
 
-    surname, given = parse_name(name)
-    given = set(given)
-    candidates = ad["by_surname"].get(surname, [])
-    if not candidates:
-        return None, "no AD match (surname)", "none", []
-
-    # candidates sharing at least one given-name token (e.g. "terry")
-    shared = [c for c in candidates if given & c["given"]]
-    if len(shared) == 1:
-        return shared[0]["email"], "heuristic (surname+given)", "medium", []
-    if len(shared) > 1:
-        return None, "review: several AD names share surname+given", "low", [c["email"] for c in shared]
-    # surname matched but no given-name overlap
-    if len(candidates) == 1:
-        return None, "review: surname-only match (no given overlap)", "low", [candidates[0]["email"]]
-    return None, "review: surname matches several, no given overlap", "low", [c["email"] for c in candidates]
+    # A comma-less name is ambiguous about which part is the surname (see
+    # parse_name_variants), so try every plausible reading and return on the
+    # first one that resolves cleanly. Remember the first reading that at
+    # least found a surname bucket, so an ambiguous-but-real match still
+    # goes to review instead of being reported as "no AD match" just because
+    # a *later*, wrong reading found nothing.
+    fallback = None
+    for surname, given_list in parse_name_variants(name):
+        given = set(given_list)
+        candidates = ad["by_surname"].get(surname, [])
+        if not candidates:
+            continue
+        # candidates sharing at least one given-name token (e.g. "terry")
+        shared = [c for c in candidates if given & c["given"]]
+        if len(shared) == 1:
+            return shared[0]["email"], "heuristic (surname+given)", "medium", []
+        if fallback is not None:
+            continue
+        if len(shared) > 1:
+            fallback = (None, "review: several AD names share surname+given", "low",
+                        [c["email"] for c in shared])
+        elif len(candidates) == 1:
+            fallback = (None, "review: surname-only match (no given overlap)", "low",
+                        [candidates[0]["email"]])
+        else:
+            fallback = (None, "review: surname matches several, no given overlap", "low",
+                        [c["email"] for c in candidates])
+    if fallback:
+        return fallback
+    return None, "no AD match (surname)", "none", []
 
 
 def resolve_recipient(row: dict, cmdb_names: dict, ad: dict, overrides: dict) -> tuple:
@@ -796,26 +877,20 @@ def generate_mock_data() -> None:
     print(f"Generating mock data in '{DATA_DIR}/' ({'xlsx' if HAVE_XLSX else 'csv'}):")
     RD = "2026-06-30"
 
-    _write_mock("AIAGO_Workstation_CS",
-        ["gis_bu", "hostname", "install_status", "os", "last_seen", "agent_version",
-         "proc_agent_installed", "proc_cs_version_status", "proc_agent_reporting", "Compliance", "report_date"],
+    _write_mock("AIAGO_Workstation_CS", FILE_REGISTRY["aiago_workstation_cs"]["columns"],
         [
             {"gis_bu": "APAC-Retail", "hostname": "WS-APAC-001", "install_status": "Installed", "os": "Windows 11 24H2", "last_seen": "2026-05-20", "agent_version": "7.30.10", "proc_agent_installed": "yes", "proc_cs_version_status": "Outdated", "proc_agent_reporting": "yes", "Compliance": "Non-Compliant", "report_date": RD},
             {"gis_bu": "APAC-Retail", "hostname": "WS-APAC-002", "install_status": "Installed", "os": "Windows 11 24H2", "last_seen": "", "agent_version": "", "proc_agent_installed": "no", "proc_cs_version_status": "", "proc_agent_reporting": "no", "Compliance": "Non-Compliant", "report_date": RD},
             {"gis_bu": "EMEA-Ops", "hostname": "WS-EMEA-014", "install_status": "Installed", "os": "Windows 11 24H2", "last_seen": "2026-06-28", "agent_version": "7.35.20709", "proc_agent_installed": "yes", "proc_cs_version_status": "Latest", "proc_agent_reporting": "no", "Compliance": "Non-Compliant", "report_date": RD},
         ])
 
-    _write_mock("AIAGO_Mac_CS",
-        ["BU", "computer_name", "os_version", "proc_agent_installed", "last_seen",
-         "proc_cs_version_status", "proc_agent_reporting", "Compliance", "report_date"],
+    _write_mock("AIAGO_Mac_CS", FILE_REGISTRY["aiago_mac_cs"]["columns"],
         [
             {"BU": "APAC-Retail", "computer_name": "MAC-APAC-07", "os_version": "macOS 14.5", "proc_agent_installed": "no", "last_seen": "", "proc_cs_version_status": "Unknown", "proc_agent_reporting": "no", "Compliance": "Non-Compliant", "report_date": RD},
             {"BU": "AMS-Corp", "computer_name": "MAC-AMS-22", "os_version": "macOS 14.4", "proc_agent_installed": "yes", "last_seen": "2026-06-27", "proc_cs_version_status": "Outdated", "proc_agent_reporting": "yes", "Compliance": "Non-Compliant", "report_date": RD},
         ])
 
-    _write_mock("AIAGO_Server_CS",
-        ["gis_bu", "ser_name", "ser_install_status", "ser_sys_class_name", "ser_os",
-         "last_seen", "agent_version", "proc_agent_installed", "proc_cs_version_status", "proc_agent_reporting", "Compliance", "report_date"],
+    _write_mock("AIAGO_Server_CS", FILE_REGISTRY["aiago_server_cs"]["columns"],
         [
             # both columns populated -> ser_os wins ("Windows")
             {"gis_bu": "EMEA-Ops", "ser_name": "SRV-EMEA-DB01", "ser_install_status": "Installed", "ser_sys_class_name": "Server", "ser_os": "Windows Server 2022", "last_seen": "2026-05-30", "agent_version": "7.28.5", "proc_agent_installed": "yes", "proc_cs_version_status": "Outdated", "proc_agent_reporting": "yes", "Compliance": "Non-Compliant", "report_date": RD},
@@ -825,19 +900,15 @@ def generate_mock_data() -> None:
             {"gis_bu": "EMEA-Ops", "ser_name": "SRV-EMEA-VDI9", "ser_install_status": "Installed", "ser_sys_class_name": "Citrix VDI", "ser_os": "", "last_seen": "2026-06-01", "agent_version": "7.29.1", "proc_agent_installed": "yes", "proc_cs_version_status": "Outdated", "proc_agent_reporting": "yes", "Compliance": "Non-Compliant", "report_date": RD},
         ])
 
-    _write_mock("AIAGO_Windows_Purview",
-        ["gis_bu", "name", "install_status", "os", "assigned_to", "purview_last_seen",
-         "purview_defender_mocamp_version", "purview_defender_engine_version",
-         "purview_configuration_status", "purview_policy_status", "compliance", "report_date"],
+    _write_mock("AIAGO_Windows_Purview", FILE_REGISTRY["aiago_windows_purview"]["columns"],
         [
             {"gis_bu": "APAC-Retail", "name": "WS-APAC-001", "install_status": "Installed", "os": "Windows 11 24H2", "assigned_to": "Chan, Tai Man Terry", "purview_last_seen": "2026-06-25", "purview_defender_mocamp_version": "4.18.25000.1", "purview_defender_engine_version": "1.1.25000.1", "purview_configuration_status": "NotUpdated", "purview_policy_status": "NotUpdated", "compliance": "Non-Compliant", "report_date": RD},
             {"gis_bu": "EMEA-Ops", "name": "WS-EMEA-030", "install_status": "Installed", "os": "Windows 11 24H2", "assigned_to": "carol@example.com", "purview_last_seen": "", "purview_defender_mocamp_version": "4.18.25000.1", "purview_defender_engine_version": "", "purview_configuration_status": "", "purview_policy_status": "", "compliance": "Non-Compliant", "report_date": RD},
+            # comma-less 'Given Surname' - the CMDB 'Assigned to'/'Owner' convention seen in prod
+            {"gis_bu": "APAC-Retail", "name": "WS-APAC-003", "install_status": "Installed", "os": "Windows 11 24H2", "assigned_to": "Siu Ming Wong", "purview_last_seen": "2026-06-20", "purview_defender_mocamp_version": "4.18.25000.1", "purview_defender_engine_version": "1.1.25000.1", "purview_configuration_status": "NotUpdated", "purview_policy_status": "NotUpdated", "compliance": "Non-Compliant", "report_date": RD},
         ])
 
-    _write_mock("AIAGO_Mac_Purview",
-        ["gis_bu", "intune_computer_name", "purview_configuration_status", "purview_policy_status",
-         "purview_last_seen", "purview_last_policy_sync_time", "purview_defender_mocamp_version",
-         "purview_defender_engine_version", "compliance", "report_date"],
+    _write_mock("AIAGO_Mac_Purview", FILE_REGISTRY["aiago_mac_purview"]["columns"],
         [
             {"gis_bu": "AMS-Corp", "intune_computer_name": "MAC-AMS-22", "purview_configuration_status": "Not Onboarded", "purview_policy_status": "Not Applied", "purview_last_seen": "2026-06-18", "purview_last_policy_sync_time": "2026-06-10", "purview_defender_mocamp_version": "", "purview_defender_engine_version": "", "compliance": "Non-Compliant", "report_date": RD},
         ])
@@ -885,16 +956,16 @@ def validate_headers() -> bool:
     print("Pre-flight header check:")
     all_ok = True
 
-    checks = []  # (stem_keyword, required_columns, optional_columns, label)
+    checks = []  # (stem_keyword, required_columns, optional_columns, label, expected_headers)
     for rk, entry in FILE_REGISTRY.items():
         checks.append((rk, list(entry["map"].values()), [],
-                        f"{entry['meta']['source']}/{entry['meta']['kind']}"))
-    checks.append((CMDB_MAPPING["stem"], list(CMDB_MAPPING["map"].values()), [], "CMDB"))
+                        f"{entry['meta']['source']}/{entry['meta']['kind']}", entry.get("columns")))
+    checks.append((CMDB_MAPPING["stem"], list(CMDB_MAPPING["map"].values()), [], "CMDB", None))
     checks.append((AD_USERS["stem"], [AD_USERS["map"]["name"], AD_USERS["map"]["email"]],
-                   [AD_USERS["map"].get("surname", ""), AD_USERS["map"].get("given", "")], "AD_Users"))
-    checks.append((OVERRIDES["stem"], list(OVERRIDES["map"].values()), [], "Overrides"))
+                   [AD_USERS["map"].get("surname", ""), AD_USERS["map"].get("given", "")], "AD_Users", None))
+    checks.append((OVERRIDES["stem"], list(OVERRIDES["map"].values()), [], "Overrides", None))
 
-    for stem_keyword, required, optional, label in checks:
+    for stem_keyword, required, optional, label, expected_headers in checks:
         found = find_dataset(stem_keyword)
         if not found:
             if label == "Overrides":
@@ -903,7 +974,7 @@ def validate_headers() -> bool:
             print(f"  !  {label}: no matching file or sheet found in '{DATA_DIR}/'")
             continue
         path, sheet = found
-        actual = _read_headers(path, sheet)
+        actual = _read_headers(path, sheet, expected_headers)
         where = f"{os.path.basename(path)}" + (f" [{sheet}]" if sheet else "")
         missing = [c for c in required if c not in actual]
         missing_opt = [c for c in optional if c and c not in actual]
