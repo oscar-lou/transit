@@ -65,6 +65,13 @@ import urllib.parse
 import urllib.request
 from datetime import date, datetime
 
+# Guarantee consolidate_noncompliant.py (always a sibling of this file) is
+# importable regardless of the caller's cwd or interpreter startup flags -
+# e.g. PYTHONSAFEPATH (Python 3.11+) disables the usual auto-add of the
+# script's own directory to sys.path, which some managed/corporate machines
+# set by policy and which otherwise turns this into a ModuleNotFoundError.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import consolidate_noncompliant as cnc
 
 # ===========================================================================
