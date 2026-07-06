@@ -759,8 +759,16 @@ def resolve_name_to_email(name: str, ad: dict, overrides: dict) -> tuple:
         candidates = ad["by_surname"].get(surname, [])
         if not candidates:
             continue
-        # candidates sharing at least one given-name token (e.g. "terry")
+        # candidates sharing at least one given-name token (e.g. "terry").
+        # A shared *count* of 1 (just "terry") is weaker evidence than 2
+        # ("terry" + "sp"), so rank by overlap size instead of treating any
+        # overlap as equally good - e.g. query 'Terry-SP Lau' -> {terry, sp}
+        # should prefer AD's 'Terry-SP.Lau' ({terry, sp}, full match) over
+        # 'Terry-CP.Lau' ({terry}, partial match), not flag both as tied.
         shared = [c for c in candidates if given & c["given"]]
+        if shared:
+            best = max(len(given & c["given"]) for c in shared)
+            shared = [c for c in shared if len(given & c["given"]) == best]
         if len(shared) == 1:
             return shared[0]["email"], "heuristic (surname+given)", "medium", []
         if fallback is not None:
@@ -938,6 +946,10 @@ def generate_mock_data() -> None:
             {"gis_bu": "APAC-Retail", "hostname": "WS-APAC-001", "install_status": "Installed", "os": "Windows 11 24H2", "last_seen": "2026-05-20", "agent_version": "7.30.10", "proc_agent_installed": "yes", "proc_cs_version_status": "Outdated", "proc_agent_reporting": "yes", "Compliance": "Non-Compliant", "report_date": RD},
             {"gis_bu": "APAC-Retail", "hostname": "WS-APAC-002", "install_status": "Installed", "os": "Windows 11 24H2", "last_seen": "", "agent_version": "", "proc_agent_installed": "no", "proc_cs_version_status": "", "proc_agent_reporting": "no", "Compliance": "Non-Compliant", "report_date": RD},
             {"gis_bu": "EMEA-Ops", "hostname": "WS-EMEA-014", "install_status": "Installed", "os": "Windows 11 24H2", "last_seen": "2026-06-28", "agent_version": "7.35.20709", "proc_agent_installed": "yes", "proc_cs_version_status": "Latest", "proc_agent_reporting": "no", "Compliance": "Non-Compliant", "report_date": RD},
+            # two AD names share the given token "terry" ('Terry' vs 'Terry-SP'),
+            # but the CMDB name carries the full 'Terry-SP' suffix - should
+            # resolve uniquely to the fuller-overlap candidate, not go to review
+            {"gis_bu": "APAC-Retail", "hostname": "WS-APAC-005", "install_status": "Installed", "os": "Windows 11 24H2", "last_seen": "2026-06-15", "agent_version": "7.30.10", "proc_agent_installed": "yes", "proc_cs_version_status": "Outdated", "proc_agent_reporting": "yes", "Compliance": "Non-Compliant", "report_date": RD},
         ])
 
     _write_mock("AIAGO_Mac_CS", FILE_REGISTRY["aiago_mac_cs"]["columns"],
@@ -994,6 +1006,7 @@ def generate_mock_data() -> None:
             {"Name": "MAC-APAC-07", "Serial number": "SN-A7", "Assigned to": "Lee, John Xavier [External]", "Install Status": "Installed", "Operating System": "macOS 14.5"},
             {"Name": "MAC-AMS-22", "Serial number": "SN-M22", "Assigned to": "Smith, Robert", "Install Status": "Installed", "Operating System": "macOS 14.4"},
             {"Name": "WS-EMEA-014", "Serial number": "SN-E14", "Assigned to": "Lam, Wai Lok Kelvin", "Install Status": "Installed", "Operating System": "Windows 11 24H2"},
+            {"Name": "WS-APAC-005", "Serial number": "SN-A5", "Assigned to": "Terry-SP Lau", "Install Status": "Installed", "Operating System": "Windows 11 24H2"},
         ])
 
     # AD directory: DisplayName -> EmailAddress. Note the shorter convention and
@@ -1012,6 +1025,11 @@ def generate_mock_data() -> None:
             {"DisplayName": "Smith, Robert-RA", "Surname": "Smith", "GivenName": "Robert", "EmailAddress": "robert.a.smith@example.com", "Department": "Finance"},
             {"DisplayName": "Smith, Robert-RB", "Surname": "Smith", "GivenName": "Robert", "EmailAddress": "robert.b.smith@example.com", "Department": "Legal"},
             {"DisplayName": "Kelvin Lam", "Surname": "Lam", "GivenName": "Kelvin", "EmailAddress": "kelvin.lam@example.com", "Department": "IT"},
+            # 'Lau' shares the given token "terry" between both rows, but only
+            # Terry-SP's given carries the full {"terry","sp"} that matches the
+            # CMDB name above - regression test for the overlap-size ranking.
+            {"DisplayName": "Lau, Terry-CP", "Surname": "Lau", "GivenName": "Terry", "EmailAddress": "terry-cp.lau@example.com", "Department": "Retail"},
+            {"DisplayName": "Lau, Terry-SP", "Surname": "Lau", "GivenName": "Terry-SP", "EmailAddress": "terry-sp.lau@example.com", "Department": "Legal"},
         ])
 
 
