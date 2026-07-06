@@ -8,7 +8,8 @@ Pipeline:
      same things, and reconcile them into ONE canonical worklist.
   2. Resolve WHO to notify for each finding:
        - workstation: assigned_to (Purview) -> else CMDB hostname->email lookup
-       - server:      BU admin/team address (servers have no end user)
+       - server:      not notified - servers still appear in the worklist for
+                      visibility, but build_notifications() skips them entirely
   3. Consolidate per recipient (one message per person, not one per file) and
      compose an Outlook email + a Teams message.
   4. STUB the send: write a preview workbook of exactly what would go out.
@@ -95,17 +96,6 @@ OVERRIDES = {
 # Only these confidence levels are turned into an actual email. Anything lower
 # is held for human review rather than risking the wrong recipient.
 NOTIFY_CONFIDENCE = {"high", "medium"}
-
-# Servers have no end user -> route to a BU admin/team address. Maintained by
-# whoever owns BU routing; a missing BU means that server is reported as
-# UNRESOLVED rather than mis-sent. Fill in real addresses.
-# All AIAGO server/workstation rows currently carry gis_bu = "AIAGO" (a single
-# BU code, not the APAC-Retail/EMEA-Ops/AMS-Corp examples this dict used to
-# have) - every one of the 68 real server rows was going UNRESOLVED because
-# "AIAGO" had no entry. Put the real server-team distro list here.
-BU_TEAM_EMAIL = {
-    "AIAGO": "REPLACE-WITH-REAL-SERVER-TEAM-EMAIL@aia.com",
-}
 
 
 # ===========================================================================
@@ -850,13 +840,8 @@ def resolve_name_to_email(name: str, ad: dict, overrides: dict) -> tuple:
 
 
 def resolve_recipient(row: dict, cmdb_names: dict, ad: dict, overrides: dict) -> tuple:
-    """-> (email_or_None, how, confidence, candidate_emails)."""
-    if row["kind"] == "Server":
-        email = BU_TEAM_EMAIL.get(row["bu"])
-        if email:
-            return email, "team (BU admin)", "high", []
-        return None, "unresolved: server, no BU team email", "none", []
-
+    """-> (email_or_None, how, confidence, candidate_emails). Only ever called
+    for workstation rows - build_notifications() skips servers before this."""
     at = (row.get("assigned_to") or "").strip()
     if "@" in at:                                   # Purview sometimes has the email directly
         return at, "user (assigned_to email)", "high", []
@@ -907,6 +892,8 @@ def compose_teams(findings: list) -> str:
 def build_notifications(rows: list, cmdb_names: dict, ad: dict, overrides: dict) -> tuple:
     groups, review, unresolved = {}, [], []
     for r in rows:
+        if r["kind"] == "Server":
+            continue  # servers have no end user to notify - tracked in the worklist only
         email, how, conf, cands = resolve_recipient(r, cmdb_names, ad, overrides)
         if email:
             g = groups.setdefault(email, {"how": how, "rows": []})
