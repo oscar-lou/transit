@@ -189,15 +189,49 @@ FILE_REGISTRY = {
                     "purview_defender_mocamp_version", "purview_defender_engine_version",
                     "compliance", "report_date"],
     },
+    # Fuller CMDB-joined DLP/Purview export (same filename family as Zapp
+    # below). Deliberately positioned AFTER aiago_windows_purview/
+    # aiago_mac_purview: load_all() dedupes rows by (hostname, source),
+    # keeping whichever copy loaded first, so this only ADDS hosts the two
+    # thinner exports above missed entirely (verified: 13 real non-compliant
+    # hosts, e.g. Caroline Choi/Jordy Ngan/Tanya Kan, present here but absent
+    # from those files) rather than double-counting the ~50 hosts both cover.
+    # Same compliance criteria (config/policy status) as the files above -
+    # unlike the sibling 'Crowdstrike' CSV (deliberately NOT added: its own
+    # 'compliant' flag only checks install presence, not version currency,
+    # which disagrees with cs_issue()'s policy on real hosts - see git log).
+    # This export lists EVERY device, not just non-compliant ones, so
+    # is_compliant_text() in normalize_file() gates on it before it becomes a finding.
+    # key "dlp" (not "aiago_dlp_full") deliberately - find_dataset() matches by
+    # substring against the real filename, e.g. "...Deployment-DLP.csv", which
+    # doesn't contain "aiago_dlp_full" (see how "zapp" below is handled too).
+    "dlp": {
+        "meta": {"source": "Purview", "platform": None, "kind": "Workstation"},
+        "map": {
+            "bu": "business_unit_code", "hostname": "name", "install_status": "install_status",
+            "os": "os", "sys_class": "sys_class_name", "assigned_to": "assigned_to",
+            "last_seen": "purview_last_seen",
+            "mocamp_version": "purview_defender_mocamp_version",
+            "engine_version": "purview_defender_engine_version",
+            "config_status": "purview_configuration_status",
+            "policy_status": "purview_policy_status",
+            "compliance": "compliance", "report_date": "report_date",
+        },
+        "columns": ["name", "manufacturer", "chassis_type", "model_id", "serial_number", "company",
+                    "assigned_to", "hardware_status", "install_status", "os", "os_domain", "u_vlan",
+                    "u_dr_availability", "u_dr_grouping", "u_security_zone", "sys_class_name",
+                    "last_discovered", "virtual", "u_non_discoverable_ci", "u_gis_exclusion",
+                    "report_date", "purview_device_name", "purview_configuration_status",
+                    "purview_policy_status", "purview_valid_user", "purview_last_seen", "purview_os",
+                    "purview_os_version", "purview_last_ip_address", "perview_device_id",
+                    "purview_last_policy_sync_time", "purview_is_dlp_enabled",
+                    "purview_defender_engine_version", "purview_defender_mocamp_version",
+                    "purview_has_dlp_ac_bandwidth_exceeded", "purview_first_time_onboarded",
+                    "purview_required", "compliance", "business_unit_code", "ageing_status"],
+    },
     # Zscaler App (client connector) deployment - NOT covered by any of the
-    # other 4 reports, unlike the sibling 'Crowdstrike'/'DLP' CSV exports
-    # (same filename family) which turned out to be ~95% the same hosts as
-    # aiago_*_cs / aiago_*_purview above, just a fuller unfiltered export of
-    # the identical CrowdStrike/Purview checks - adding those as separate
-    # entries would double-count and double-email those hosts, so they're
-    # deliberately left out. This export lists EVERY device (compliant and
-    # not) rather than being pre-filtered, so zapp_issue() gates on
-    # 'compliant' itself - see the comment there.
+    # other reports. This export lists EVERY device (compliant and not)
+    # rather than being pre-filtered, so is_compliant_text() gates it too.
     "zapp": {
         "meta": {"source": "Zapp", "platform": None, "kind": "Workstation"},
         "map": {
@@ -360,15 +394,17 @@ def purview_issue(config_status: str, policy_status: str, platform: str = "",
             detail)
 
 
-def zapp_issue(compliant: str, zapp_installed: str, zapp_missing: str):
-    """-> (issue, action) or None. Unlike the CrowdStrike/Purview exports
-    (pre-filtered to non-compliant rows upstream), the Zapp export lists
-    EVERY device with a boolean 'compliant' flag, so this is the one source
-    that has to gate on it itself - otherwise every already-compliant
-    device would get reported as a finding too."""
-    c = (compliant or "").strip().lower()
-    if c not in ("0", "false", "no"):
-        return None
+def is_compliant_text(value: str) -> bool:
+    """True if a source's own 'compliance' column says this row is already
+    compliant. The original 5 AIAGO exports are pre-filtered to non-compliant
+    rows only (this is always False for them), but the fuller unfiltered
+    exports (Zapp, the merged DLP export) list EVERY device, so normalize_file
+    gates on this before generating a finding - otherwise a compliant device
+    would get reported as a finding too."""
+    return (value or "").strip().lower() in ("1", "true", "yes", "compliant")
+
+
+def zapp_issue(zapp_installed: str, zapp_missing: str) -> tuple:
     if (zapp_missing or "").strip().lower() in ("1", "true", "yes") or \
        (zapp_installed or "").strip().lower() in ("0", "false", "no"):
         return ("Zapp (Zscaler Client Connector) not installed",
@@ -417,6 +453,14 @@ def normalize_file(path: str, sheet: str = None, registry_key: str = None) -> li
     rows = []
     for raw in _read_any(path, sheet, expected_headers=entry.get("columns")):
         f = {canon: cell_to_str(raw.get(col, "")) for canon, col in cmap.items()}
+        # The original 5 exports are pre-filtered to non-compliant rows, so
+        # this is always False for them. The fuller unfiltered exports (Zapp,
+        # the merged DLP export) list EVERY device, so skip the ones their
+        # own 'compliance' column already says are fine - a no-op for the
+        # pre-filtered sources since 'compliance' there is always non-compliant.
+        if is_compliant_text(f.get("compliance")):
+            continue
+
         # Platform: fixed for most files. For servers it comes from ser_os, but
         # that column is sometimes empty while ser_sys_class_name carries the
         # OS signal (e.g. "Citrix VDI", "Linux Server"); try os first, then
@@ -436,10 +480,7 @@ def normalize_file(path: str, sheet: str = None, registry_key: str = None) -> li
             if f.get("agent_version"):
                 detail += f", agent={f['agent_version']}"
         elif meta["source"] == "Zapp":
-            result = zapp_issue(f.get("compliance"), f.get("zapp_installed"), f.get("zapp_missing"))
-            if result is None:
-                continue  # compliant device in a full (unfiltered) export - not a finding
-            issue, action = result
+            issue, action = zapp_issue(f.get("zapp_installed"), f.get("zapp_missing"))
             detail = (f"installed={f.get('zapp_installed') or 'n/a'}, "
                       f"missing={f.get('zapp_missing') or 'n/a'}, "
                       f"version={f.get('zapp_version') or 'n/a'}")
@@ -468,10 +509,19 @@ def normalize_file(path: str, sheet: str = None, registry_key: str = None) -> li
 
 
 def load_all() -> list:
-    """Find each of the 5 known reports, whether it's its own file or a tab
+    """Find each of the known reports, whether it's its own file or a tab
     inside a larger multi-tab workbook (e.g. everything living in one
     'CompliantReport(Working).xlsx'). Each report is loaded exactly once, by
-    whichever form is found first (standalone file takes priority)."""
+    whichever form is found first (standalone file takes priority).
+
+    Some reports overlap in host coverage by design (e.g. "dlp" is a
+    fuller re-export of the same check as aiago_windows_purview/mac_purview -
+    see FILE_REGISTRY comment), so rows are deduplicated by (hostname,
+    source), keeping whichever copy was loaded first. FILE_REGISTRY lists the
+    thinner/original exports before their fuller counterparts, so this keeps
+    the original's row for any host both cover and only ADDS hosts unique to
+    the fuller export - never double-counts, never drops a host either side
+    catches alone."""
     all_rows = []
     print(f"Reading reports from '{DATA_DIR}/':")
     for rk in FILE_REGISTRY:
@@ -481,7 +531,19 @@ def load_all() -> list:
             continue
         path, sheet = found
         all_rows.extend(normalize_file(path, sheet, registry_key=rk))
-    return all_rows
+
+    seen, deduped, dropped = set(), [], 0
+    for r in all_rows:
+        key = ((r.get("hostname") or "").strip().upper(), r["source"])
+        if key in seen:
+            dropped += 1
+            continue
+        seen.add(key)
+        deduped.append(r)
+    if dropped:
+        print(f"  (dropped {dropped} row(s) already covered by an earlier-loaded "
+              f"report for the same host+source)")
+    return deduped
 
 
 # ===========================================================================
@@ -993,6 +1055,27 @@ def generate_mock_data() -> None:
              "assigned_to": "carol@example.com", "install_status": "Installed", "os": "Windows 11 24H2",
              "sys_class_name": "Computer", "zapp_installed": "1", "zapp_missing": "0",
              "compliant": "1", "report_date": RD},
+        ])
+
+    _write_mock("DLP_Deployment", FILE_REGISTRY["dlp"]["columns"],
+        [
+            # same host+finding as AIAGO_Windows_Purview's WS-APAC-001 above -
+            # load_all()'s dedup must drop this copy, not double-email Terry
+            {"name": "WS-APAC-001", "business_unit_code": "APAC-Retail", "assigned_to": "Chan, Tai Man Terry",
+             "install_status": "Installed", "os": "Windows 11 24H2", "sys_class_name": "Computer",
+             "purview_configuration_status": "NotUpdated", "purview_policy_status": "NotUpdated",
+             "purview_last_seen": "2026-06-25", "compliance": "Non-compliant", "report_date": RD},
+            # host this fuller export catches that the thinner Purview exports
+            # above never listed at all - must be ADDED, not dropped
+            {"name": "WS-APAC-006", "business_unit_code": "APAC-Retail", "assigned_to": "Wong, Siu Ming",
+             "install_status": "Installed", "os": "Windows 11 24H2", "sys_class_name": "Computer",
+             "purview_configuration_status": "", "purview_policy_status": "",
+             "purview_last_seen": "", "compliance": "Non-compliant", "report_date": RD},
+            # compliant device in this UNFILTERED export -> must be skipped
+            {"name": "WS-APAC-007", "business_unit_code": "APAC-Retail", "assigned_to": "carol@example.com",
+             "install_status": "Installed", "os": "Windows 11 24H2", "sys_class_name": "Computer",
+             "purview_configuration_status": "Updated", "purview_policy_status": "Updated",
+             "purview_last_seen": "2026-06-29", "compliance": "Compliant", "report_date": RD},
         ])
 
     # CMDB export: hostname ('Name') -> assigned user DISPLAY NAME ('Assigned to').
