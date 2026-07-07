@@ -1,0 +1,108 @@
+"""Tests for the per-source issue/action derivation and the compliance gate
+that makes the unfiltered exports (Zapp, merged DLP) safe to mix in with the
+5 originally pre-filtered reports.
+"""
+import pytest
+
+import consolidate_noncompliant as cnc
+
+
+# --- is_compliant_text --------------------------------------------------------
+
+@pytest.mark.parametrize("value,expected", [
+    ("Compliant", True), ("compliant", True), ("1", True), ("true", True),
+    ("TRUE", True), ("Yes", True),
+    ("Non-Compliant", False), ("Non-compliant", False), ("0", False),
+    ("false", False), ("", False), (None, False),
+])
+def test_is_compliant_text(value, expected):
+    assert cnc.is_compliant_text(value) is expected
+
+
+# --- cs_issue -----------------------------------------------------------------
+
+def test_cs_issue_not_installed_flag_wins_even_with_a_reason():
+    issue, action = cnc.cs_issue("Outdated", "No")
+    assert issue == "CrowdStrike agent not installed"
+
+
+def test_cs_issue_unknown_reason():
+    issue, action = cnc.cs_issue("Unknown", "Yes")
+    assert issue == "CrowdStrike agent not installed"
+
+
+def test_cs_issue_outdated():
+    issue, action = cnc.cs_issue("Outdated", "Yes")
+    assert issue == "CrowdStrike agent outdated"
+    assert cnc.CS_LATEST["windows"] in action
+
+
+def test_cs_issue_latest_but_not_reporting():
+    issue, action = cnc.cs_issue("Latest", "Yes")
+    assert issue == "Agent current but NOT reporting"
+
+
+def test_cs_issue_blank_reason_but_installed():
+    issue, action = cnc.cs_issue("", "Yes")
+    assert issue == "CrowdStrike status not reported"
+
+
+def test_cs_issue_unrecognized_status_falls_through():
+    issue, action = cnc.cs_issue("SomeNewStatus", "Yes")
+    assert "SomeNewStatus" in issue
+
+
+# --- purview_issue --------------------------------------------------------
+
+def test_purview_issue_not_updated():
+    issue, action, detail = cnc.purview_issue("NotUpdated", "NotUpdated", "Windows", "1.0", "2.0")
+    assert "not updated" in issue.lower()
+    assert cnc.PURVIEW_LATEST["windows"]["mocamp"] in action
+
+
+def test_purview_issue_blank_means_not_enrolled():
+    issue, action, detail = cnc.purview_issue("", "", "Windows")
+    assert "not enrolled" in issue.lower()
+
+
+def test_purview_issue_other_status_falls_through():
+    issue, action, detail = cnc.purview_issue("Updated", "Applied", "Windows")
+    assert "Updated" in issue and "Applied" in issue
+
+
+def test_purview_issue_uses_mac_reference_versions_on_mac():
+    issue, action, detail = cnc.purview_issue("NotUpdated", "NotUpdated", "Mac")
+    assert cnc.PURVIEW_LATEST["macos"]["mocamp"] in action
+
+
+# --- zapp_issue -----------------------------------------------------------
+
+def test_zapp_issue_missing_client():
+    issue, action = cnc.zapp_issue("0", "1")
+    assert "not installed" in issue.lower()
+
+
+def test_zapp_issue_not_installed_flag():
+    issue, action = cnc.zapp_issue("0", "0")
+    assert "not installed" in issue.lower()
+
+
+def test_zapp_issue_other_noncompliance():
+    issue, action = cnc.zapp_issue("1", "0")
+    assert issue == "Zapp reporting non-compliant"
+
+
+# --- _platform_from_os ------------------------------------------------------
+
+@pytest.mark.parametrize("text,expected", [
+    ("Windows 11 24H2", "Windows"),
+    ("macOS 14.5", "Mac"),
+    ("Mac OS X", "Mac"),
+    ("Ubuntu 22.04", "Linux"),
+    ("RHEL 8", "Linux"),
+    ("Citrix VDI", "Unknown"),
+    ("", "Unknown"),
+    (None, "Unknown"),
+])
+def test_platform_from_os(text, expected):
+    assert cnc._platform_from_os(text) == expected
