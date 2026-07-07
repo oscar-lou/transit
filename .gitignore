@@ -2,3 +2,8 @@
 *.csv
 data/
 output/
+.gitignore
+.claude
+__pycache__
+.env
+.venv

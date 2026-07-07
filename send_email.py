@@ -43,6 +43,10 @@ Auth (env vars only - never hardcoded, never interactive/device-code):
                        as a specific mailbox, e.g. compliance-bot@aia.com)
   COMPLIANCE_TEST_INBOX   required for --send-to-self: your own test mailbox
 
+  All of the above can also go in a .env file next to this script (gitignored,
+  never committed) instead of real shell env vars - loaded automatically on
+  import. A real environment variable always takes priority over .env.
+
 Run:
   python send_email.py                                          # dry-run (default)
   python send_email.py --send-to-self
@@ -71,6 +75,30 @@ from datetime import date, datetime
 # script's own directory to sys.path, which some managed/corporate machines
 # set by policy and which otherwise turns this into a ModuleNotFoundError.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def _load_dotenv(path: str) -> None:
+    """Minimal .env loader (KEY=VALUE per line, '#' comments and blanks
+    skipped) - deliberately no new dependency on python-dotenv, matching
+    the rest of this codebase's stdlib-only style. An already-set real
+    environment variable always wins over the .env file, so this never
+    shadows a CI/production value with a stale local one."""
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+_load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 import consolidate_noncompliant as cnc
 
@@ -275,10 +303,11 @@ def _run_with_groups(mode: str, groups: dict, review: list, unresolved: list,
 
     test_inbox = None
     if mode == "send-to-self":
-        test_inbox = os.environ.get("COMPLIANCE_TEST_INBOX")
-        if not test_inbox:
+        test_inbox = os.environ.get("COMPLIANCE_TEST_INBOX", "")
+        if not test_inbox or "@" not in test_inbox or "replace" in test_inbox.lower():
             print("Refusing to send: --send-to-self requires the COMPLIANCE_TEST_INBOX "
-                  "environment variable (your own test mailbox address).")
+                  "environment variable set to your real test mailbox address "
+                  "(edit .env - it still has the placeholder value, or isn't set at all).")
             return 1
 
     creds = _load_graph_credentials()
