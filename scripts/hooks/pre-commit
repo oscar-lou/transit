@@ -1,0 +1,37 @@
+#!/bin/sh
+# Pre-commit hook: runs the pytest suite and blocks the commit if it fails.
+# Plain POSIX shell - no framework (no pre-commit/husky/etc), no new
+# dependency. This is the version-controlled SOURCE of the hook; it isn't
+# run directly by git - see scripts/install-hooks.sh, which copies it into
+# .git/hooks/pre-commit (that directory isn't version-controlled, so a fresh
+# clone needs the copy step run once).
+#
+# Escape hatch: `git commit --no-verify` skips this hook entirely - use it
+# for a genuine WIP commit. The default path (plain `git commit`) always
+# runs the tests.
+
+REPO_ROOT="$(git rev-parse --show-toplevel)" || exit 1
+PYTHON="$REPO_ROOT/.venv/bin/python3"
+
+if [ ! -x "$PYTHON" ]; then
+    echo "pre-commit: expected the project venv at $PYTHON but it isn't there (or isn't executable)." >&2
+    echo "pre-commit: set it up with:" >&2
+    echo "    python3 -m venv \"$REPO_ROOT/.venv\"" >&2
+    echo "    \"$REPO_ROOT/.venv/bin/pip\" install -r \"$REPO_ROOT/requirements.txt\"" >&2
+    echo "pre-commit: refusing to fall back to a global python that may lack test dependencies." >&2
+    echo "pre-commit: to bypass this check once (e.g. a genuine WIP commit): git commit --no-verify" >&2
+    exit 1
+fi
+
+cd "$REPO_ROOT" || exit 1
+"$PYTHON" -m pytest -q
+STATUS=$?
+
+if [ "$STATUS" -ne 0 ]; then
+    echo "" >&2
+    echo "pre-commit: commit BLOCKED - the test suite failed (see output above)." >&2
+    echo "pre-commit: fix the failing test(s), or bypass intentionally with: git commit --no-verify" >&2
+    exit 1
+fi
+
+exit 0
