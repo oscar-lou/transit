@@ -47,6 +47,19 @@ def test_cs_issue_blank_reason_but_installed():
     assert issue == "CrowdStrike status not reported"
 
 
+def test_cs_issue_blank_reason_and_not_installed():
+    """Pins the exact pair some real files (e.g. Workstation) actually send:
+    a blank reason cell AND proc_agent_installed='No' (they leave the reason
+    blank for agent-less hosts instead of writing 'Unknown'). Must still
+    report 'not installed', not fall through to the blank-reason 'status not
+    reported' branch - existing tests only cover blank+Yes or non-blank+No,
+    never both blank and not-installed together."""
+    issue, action = cnc.cs_issue("", "No")
+    assert issue == "CrowdStrike agent not installed", (
+        f"REGRESSION: blank reason + not-installed must report "
+        f"'CrowdStrike agent not installed', got {issue!r}")
+
+
 def test_cs_issue_unrecognized_status_falls_through():
     issue, action = cnc.cs_issue("SomeNewStatus", "Yes")
     assert "SomeNewStatus" in issue

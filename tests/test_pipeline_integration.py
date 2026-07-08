@@ -48,6 +48,13 @@ def test_full_pipeline_against_mock_fixtures(tmp_path, monkeypatch):
     assert any(r["hostname"] == "WS-APAC-006"
                for g in groups.values() for r in g["rows"])
 
+    # DLP's compliant mock row (WS-APAC-007, compliance="Compliant") must be
+    # gated out by is_compliant_text() before it ever becomes a finding - it
+    # should never even reach `rows`, let alone groups/review/unresolved.
+    assert not any(r["hostname"] == "WS-APAC-007" for r in rows), (
+        "REGRESSION: DLP's Compliant row (WS-APAC-007) was not gated out - "
+        "is_compliant_text() gating broke for the DLP source")
+
     # Servers must never reach groups/review/unresolved.
     server_hosts = {"SRV-EMEA-DB01", "SRV-AMS-APP3", "SRV-EMEA-VDI9"}
     assert not any(r["hostname"] in server_hosts for g in groups.values() for r in g["rows"])
@@ -79,3 +86,42 @@ def test_build_notifications_skips_server_rows_directly():
                        | {r["hostname"] for r, how, cands in review}
                        | {r["hostname"] for r, how in unresolved})
     assert "SRV1" not in all_seen_hosts
+
+
+def test_ambiguous_name_lands_in_review_and_never_in_groups():
+    """The most important safety invariant: exercises build_notifications()'s
+    ACTUAL review/groups routing - not just resolve_name_to_email() in
+    isolation, which is already covered elsewhere (test_name_resolution.py::
+    test_genuine_tie_goes_to_review_not_guessed). A genuinely ambiguous name
+    (two real AD people both 'Smith, Robert', tying on surname+given) must
+    never be guessed into the send set. If 'elif conf == "low":
+    review.append(...)' in build_notifications() were ever changed to add to
+    groups instead (or as well), this test fails."""
+    ad = {
+        "exact": {},
+        "by_surname": {
+            "smith": [
+                {"disp": "Smith, Robert-RA", "email": "robert.a.smith@example.com",
+                 "given": {"robert"}},
+                {"disp": "Smith, Robert-RB", "email": "robert.b.smith@example.com",
+                 "given": {"robert"}},
+            ],
+        },
+    }
+    rows = [{
+        "kind": "Workstation", "hostname": "MAC-AMS-22", "bu": "AMS-Corp",
+        "source": "CrowdStrike", "issue": "x", "action": "y",
+        "assigned_to": "Smith, Robert",
+    }]
+
+    groups, review, unresolved = cnc.build_notifications(rows, {}, ad, {})
+
+    assert groups == {}, (
+        f"REGRESSION: ambiguous name reached the send set - got groups={groups!r}")
+    assert unresolved == [], (
+        f"ambiguous-but-real name should go to review, not unresolved - got {unresolved!r}")
+    assert len(review) == 1, f"expected exactly one review entry, got {review!r}"
+    r, how, cands = review[0]
+    assert r["hostname"] == "MAC-AMS-22"
+    assert set(cands) == {"robert.a.smith@example.com", "robert.b.smith@example.com"}, (
+        f"expected both tied candidates listed for review, got {cands!r}")

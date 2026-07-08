@@ -2,6 +2,8 @@
 source (a real AIAGO_Workstation_CS.xlsx export had column 8's name replaced
 with the literal number 0).
 """
+import openpyxl
+
 import consolidate_noncompliant as cnc
 
 EXPECTED = ["gis_bu", "hostname", "install_status", "os", "last_seen", "agent_version",
@@ -55,3 +57,39 @@ def test_known_limitation_a_genuine_novel_rename_also_gets_healed():
     expected = ["a", "b", "c"]
     headers = ["a", "b_v2", "c"]
     assert cnc._heal_headers(headers, expected) == expected
+
+
+def test_corrupted_header_end_to_end_still_classifies_correctly(tmp_path):
+    """Drives a genuinely corrupted xlsx (column 8's header replaced with the
+    literal number 0, exactly as seen in production) through the FULL read
+    path - _read_xlsx_rows -> normalize_file -> cs_issue - and asserts the
+    resulting finding is classified correctly, not blank. The heal function
+    itself is already pinned in isolation above; this pins the downstream
+    result, so a change that breaks the wiring between healing and
+    classification (not just the heal itself) would be caught here.
+
+    Uses FILE_REGISTRY's own column list (not the local EXPECTED constant)
+    so this test can't silently drift from what normalize_file() actually
+    expects.
+    """
+    columns = cnc.FILE_REGISTRY["aiago_workstation_cs"]["columns"]
+    corrupted_headers = list(columns)
+    corrupted_headers[7] = 0  # literal int, matching the real corruption openpyxl reads back
+    data_row = ["AIAGO", "HHOWKLC-TEST01", "Installed", "Windows 11 Enterprise",
+                "2026-07-01", "7.30.10", "Yes", "Outdated", "Yes", "Non-Compliant", "2026-07-01"]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(corrupted_headers)
+    ws.append(data_row)
+    path = tmp_path / "AIAGO_Workstation_CS.xlsx"
+    wb.save(path)
+
+    rows = cnc.normalize_file(str(path), registry_key="aiago_workstation_cs")
+
+    assert len(rows) == 1, f"expected exactly one normalized row, got {rows!r}"
+    assert rows[0]["issue"] == "CrowdStrike agent outdated", (
+        f"REGRESSION: header self-heal did not propagate to correct "
+        f"classification - got issue={rows[0]['issue']!r}")
+    assert rows[0]["issue"] != "CrowdStrike status not reported", (
+        "REGRESSION: corrupted header caused cs_reason to read as blank")
