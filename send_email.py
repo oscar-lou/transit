@@ -59,6 +59,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import html
 import json
 import os
 import shutil
@@ -141,11 +142,20 @@ def _get_graph_token(tenant_id: str, client_id: str, client_secret: str) -> str:
     return payload["access_token"]
 
 
-def _graph_send_mail(token: str, sender_upn: str, to_email: str, subject: str, body_text: str) -> int:
+def _graph_send_mail(token: str, sender_upn: str, to_email: str, subject: str, body_html: str) -> int:
+    """Sends body_html as the message's body, contentType='HTML'. Graph's
+    sendMail only accepts a single body.contentType - there's no field for a
+    true multipart/alternative plain-text part without switching to a raw-
+    MIME create+send flow, which isn't done here (bigger change to the send
+    mechanics, more Graph calls/failure surface per recipient - deliberately
+    out of scope). consolidate_noncompliant.compose_email()'s plain text
+    remains available (used for the subject line and the dry-run preview)
+    as the starting point if a true multipart implementation is ever wanted.
+    """
     message = {
         "message": {
             "subject": subject,
-            "body": {"contentType": "Text", "content": body_text},
+            "body": {"contentType": "HTML", "content": body_html},
             "toRecipients": [{"emailAddress": {"address": to_email}}],
         },
         "saveToSentItems": "true",
@@ -160,10 +170,10 @@ def _graph_send_mail(token: str, sender_upn: str, to_email: str, subject: str, b
         return resp.status
 
 
-def send_one(token: str, sender_upn: str, to_email: str, subject: str, body: str) -> tuple:
+def send_one(token: str, sender_upn: str, to_email: str, subject: str, body_html: str) -> tuple:
     """-> (result, error). Never raises - one bad recipient must not abort the run."""
     try:
-        _graph_send_mail(token, sender_upn, to_email, subject, body)
+        _graph_send_mail(token, sender_upn, to_email, subject, body_html)
         return "sent", ""
     except urllib.error.HTTPError as e:
         try:
@@ -287,8 +297,10 @@ def _run_with_groups(mode: str, groups: dict, review: list, unresolved: list,
 
     if mode == "dry-run":
         preview = cnc.write_notifications_preview(groups, review, unresolved)
+        html_preview = cnc.write_html_preview(groups)
         cnc.print_notify_summary(groups, review, unresolved)
         print(f"\n[dry-run] Notification preview -> {preview}   (NOTHING SENT)")
+        print(f"[dry-run] HTML preview (open in a browser) -> {html_preview}   (NOTHING SENT)")
         return 0
 
     if mode == "send-live" and not confirm_live:
@@ -326,7 +338,8 @@ def _run_with_groups(mode: str, groups: dict, review: list, unresolved: list,
     sent_count = fail_count = skip_count = 0
 
     for email, g in sorted(groups.items()):
-        subject, body = cnc.compose_email(g["rows"])
+        subject, _ = cnc.compose_email(g["rows"])  # plain text unused for sending; subject is shared
+        body_html = cnc.compose_email_html(g["rows"])
         sig = _finding_set_signature(g["rows"])
 
         if (email, sig, today, mode) in prior_sent:
@@ -335,13 +348,17 @@ def _run_with_groups(mode: str, groups: dict, review: list, unresolved: list,
             skip_count += 1
             continue
 
-        actual, send_subject, send_body = email, subject, body
+        actual, send_subject, send_body_html = email, subject, body_html
         if mode == "send-to-self":
             actual = test_inbox
             send_subject = f"[TEST -> {email}] {subject}"
-            send_body = f"[TEST — would have gone to: {email}]\n\n{body}"
+            banner = (f'<p style="background:#fff3cd; border:1px solid #ffeeba; '
+                      f'padding:8px 12px; font-family:\'Segoe UI\',Arial,sans-serif; '
+                      f'font-size:13px; color:#856404;">'
+                      f'[TEST — would have gone to: {html.escape(email)}]</p>')
+            send_body_html = banner + body_html
 
-        result, error = send_one(token, creds["GRAPH_SENDER_UPN"], actual, send_subject, send_body)
+        result, error = send_one(token, creds["GRAPH_SENDER_UPN"], actual, send_subject, send_body_html)
         if result == "sent":
             sent_count += 1
             print(f"  sent    {email} -> {actual}: {subject}")

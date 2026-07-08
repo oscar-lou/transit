@@ -34,6 +34,7 @@ Run:
 from __future__ import annotations
 
 import csv
+import html
 import os
 import sys
 from datetime import datetime, date
@@ -889,6 +890,41 @@ def compose_email(findings: list) -> tuple:
     return subject, "\n".join(lines)
 
 
+def compose_email_html(findings: list) -> str:
+    """HTML counterpart to compose_email() - presentation only, same content:
+    same greeting, same host list, same SLA line, same USER_FACING_ACTION,
+    same sign-off. Deliberately does NOT reintroduce the per-finding
+    issue/action detail compose_email() already dropped for end users - see
+    that function's docstring. compose_email() remains the plain-text
+    version (used for the subject line and the dry-run preview); this is an
+    additional HTML rendering, not a replacement.
+
+    Every interpolated value is html.escape()'d before being placed into the
+    markup - hostnames come from the source reports and must never be
+    trusted as safe-to-embed raw text. Simple inline-styled markup only (no
+    external CSS/fonts/JS/remote images) so it renders predictably in a
+    conservative client like Outlook.
+    """
+    hosts = sorted({f["hostname"] for f in findings})
+
+    host_items = "".join(
+        f'<li style="font-size:16px; font-weight:bold; margin:6px 0; color:#1a1a1a;">'
+        f'{html.escape(host)}</li>'
+        for host in hosts
+    )
+
+    return f"""<div style="font-family:'Segoe UI',Arial,sans-serif; font-size:14px; color:#1a1a1a; line-height:1.5;">
+<p>Hello,</p>
+<p>The following device(s) associated with you are currently flagged non-compliant and need attention within {html.escape(str(REMEDIATION_DAYS))} business days:</p>
+<ul style="margin:8px 0 16px 20px; padding:0;">
+{host_items}
+</ul>
+<p>{html.escape(USER_FACING_ACTION)}</p>
+<p>If you continue to see this notice after doing so, please contact IT Support.</p>
+<p>Thank you,<br>{html.escape(FROM_TEAM)}</p>
+</div>"""
+
+
 def compose_teams(findings: list) -> str:
     hosts = sorted({f["hostname"] for f in findings})
     return (f"You have {len(hosts)} non-compliant device(s) needing attention within "
@@ -949,6 +985,46 @@ def write_notifications_preview(groups: dict, review: list, unresolved: list) ->
         ur.append([r["hostname"], r["source"], r["platform"], r["kind"], r["bu"], how])
     ur.freeze_panes = "A2"
     wb.save(path)
+    return path
+
+
+def write_html_preview(groups: dict) -> str:
+    """Renders every recipient's compose_email_html() output into ONE combined
+    HTML file under OUTPUT_DIR, so the actual rendered formatting can be
+    opened in a browser and eyeballed before any real send - a pure review
+    aid, nothing here is sent. Only the confidently-resolved `groups` are
+    rendered (same set write_notifications_preview()'s Notifications sheet
+    covers) - review/unresolved findings are never emailed, so there's
+    nothing to preview a rendering of for them.
+    """
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    path = os.path.join(OUTPUT_DIR, "notifications_preview.html")
+
+    sections = []
+    for email, g in sorted(groups.items()):
+        subject, _ = compose_email(g["rows"])
+        body_html = compose_email_html(g["rows"])
+        sections.append(f"""
+<section style="border:1px solid #ccc; border-radius:6px; margin:0 0 24px 0; padding:16px; max-width:700px; background:#fff;">
+  <div style="font-family:'Segoe UI',Arial,sans-serif; font-size:12px; color:#666; margin-bottom:8px;">
+    <strong>To:</strong> {html.escape(email)}<br>
+    <strong>Subject:</strong> {html.escape(subject)}
+  </div>
+  <hr style="border:none; border-top:1px solid #eee; margin:8px 0 16px 0;">
+  {body_html}
+</section>""")
+
+    page = f"""<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Notification preview - {len(groups)} recipient(s)</title></head>
+<body style="font-family:'Segoe UI',Arial,sans-serif; background:#f4f4f4; padding:24px; margin:0;">
+<h2 style="font-family:'Segoe UI',Arial,sans-serif;">Notification preview - {len(groups)} recipient(s) - NOTHING SENT</h2>
+{"".join(sections)}
+</body>
+</html>
+"""
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(page)
     return path
 
 
@@ -1186,10 +1262,12 @@ def main() -> None:
     overrides = read_overrides()
     groups, review, unresolved = build_notifications(rows, cmdb_names, ad, overrides)
     preview = write_notifications_preview(groups, review, unresolved)
+    html_preview = write_html_preview(groups)
     print_notify_summary(groups, review, unresolved)
 
     print(f"\nConsolidated worklist   -> {worklist}")
     print(f"Notification preview    -> {preview}   (NOTHING SENT)")
+    print(f"HTML preview (open in a browser) -> {html_preview}   (NOTHING SENT)")
 
 
 if __name__ == "__main__":

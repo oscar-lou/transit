@@ -9,6 +9,8 @@ of the bugs already found and fixed:
   - the DLP/Purview cross-source dedup
   - servers staying in the worklist but out of notifications
 """
+import os
+
 import openpyxl
 
 import consolidate_noncompliant as cnc
@@ -125,3 +127,24 @@ def test_ambiguous_name_lands_in_review_and_never_in_groups():
     assert r["hostname"] == "MAC-AMS-22"
     assert set(cands) == {"robert.a.smith@example.com", "robert.b.smith@example.com"}, (
         f"expected both tied candidates listed for review, got {cands!r}")
+
+
+def test_write_html_preview_renders_all_recipients(tmp_path, monkeypatch):
+    """write_html_preview() must produce a real, openable HTML file covering
+    every confidently-resolved recipient - the whole point is being able to
+    eyeball the rendered formatting before any real send."""
+    monkeypatch.setattr(cnc, "DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(cnc, "OUTPUT_DIR", str(tmp_path / "output"))
+
+    cnc.generate_mock_data()
+    rows, groups, review, unresolved = _run_pipeline()
+    assert groups, "test fixture sanity check - need at least one recipient"
+
+    path = cnc.write_html_preview(groups)
+    assert os.path.exists(path)
+
+    content = open(path, encoding="utf-8").read()
+    assert content.startswith("<!doctype html>")
+    for email in groups:
+        assert cnc.html.escape(email) in content, (
+            f"HTML preview is missing recipient {email!r}")
