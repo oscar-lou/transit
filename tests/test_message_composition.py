@@ -26,13 +26,13 @@ def test_html_has_same_hostnames_as_plain_text():
 
 
 def test_html_conveys_same_core_content_as_plain_text():
-    """Same SLA figure, same instruction, same sign-off - no more, no less."""
+    """Same urgency line, same instruction, same sign-off - no more, no less."""
     findings = [_finding("HHOWKLC-TEST01")]
     subject, plain_body = cnc.compose_email(findings)
     html_body = cnc.compose_email_html(findings)
 
-    assert str(cnc.REMEDIATION_DAYS) in plain_body
-    assert str(cnc.REMEDIATION_DAYS) in html_body
+    assert "as soon as possible" in plain_body
+    assert "as soon as possible" in html_body
 
     assert cnc.USER_FACING_ACTION in plain_body
     assert cnc.USER_FACING_ACTION in html_body

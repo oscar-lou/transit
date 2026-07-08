@@ -60,7 +60,6 @@ PURVIEW_LATEST = {
 }
 
 # --- notification settings -------------------------------------------------
-REMEDIATION_DAYS = 5            # SLA from the CrowdStrike email
 FROM_TEAM = "IT Compliance"     # appears in the message signature
 
 # What the END USER is told to do. Deliberately not the per-finding technical
@@ -880,7 +879,7 @@ def compose_email(findings: list) -> tuple:
     subject = f"Action required: {len(hosts)} device(s) need a security update"
     lines = ["Hello,", "",
              f"The following device(s) associated with you are currently flagged "
-             f"non-compliant and need attention within {REMEDIATION_DAYS} business days:", ""]
+             f"non-compliant and need attention as soon as possible:", ""]
     for host in hosts:
         lines.append(f"* {host}")
     lines += ["", USER_FACING_ACTION, "",
@@ -891,7 +890,7 @@ def compose_email(findings: list) -> tuple:
 
 def compose_email_html(findings: list) -> str:
     """HTML counterpart to compose_email() - presentation only, same content:
-    same greeting, same host list, same SLA line, same USER_FACING_ACTION,
+    same greeting, same host list, same urgency line, same USER_FACING_ACTION,
     same sign-off. Deliberately does NOT reintroduce the per-finding
     issue/action detail compose_email() already dropped for end users - see
     that function's docstring. compose_email() remains the plain-text
@@ -914,7 +913,7 @@ def compose_email_html(findings: list) -> str:
 
     return f"""<div style="font-family:'Segoe UI',Arial,sans-serif; font-size:14px; color:#1a1a1a; line-height:1.5;">
 <p>Hello,</p>
-<p>The following device(s) associated with you are currently flagged non-compliant and need attention within {html.escape(str(REMEDIATION_DAYS))} business days:</p>
+<p>The following device(s) associated with you are currently flagged non-compliant and need attention as soon as possible:</p>
 <ul style="margin:8px 0 16px 20px; padding:0;">
 {host_items}
 </ul>
@@ -926,8 +925,8 @@ def compose_email_html(findings: list) -> str:
 
 def compose_teams(findings: list) -> str:
     hosts = sorted({f["hostname"] for f in findings})
-    return (f"You have {len(hosts)} non-compliant device(s) needing attention within "
-            f"{REMEDIATION_DAYS} business days: {', '.join(hosts)}. {USER_FACING_ACTION}")
+    return (f"You have {len(hosts)} non-compliant device(s) needing attention as soon as "
+            f"possible: {', '.join(hosts)}. {USER_FACING_ACTION}")
 
 
 def build_notifications(rows: list, cmdb_names: dict, ad: dict, overrides: dict) -> tuple:
