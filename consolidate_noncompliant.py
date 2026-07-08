@@ -67,12 +67,11 @@ FROM_TEAM = "IT Compliance"     # appears in the message signature
 # 'action' text (sensor versions, Software Center steps, DLP enrollment,
 # ZIA/MOCAMP jargon, CMDB inventory upkeep) - that's for whoever runs this
 # script, and stays fully intact in the Worklist (noncompliant_consolidated.xlsx)
-# 'Action'/'Detail' columns. In practice devices are managed centrally (SCCM/
-# Intune push updates once a device checks in), so the one thing a non-IT
-# recipient can actually do is leave the device powered on and connected.
-USER_FACING_ACTION = ("Please make sure this device is powered on and connected "
-                      "to the network (office Wi-Fi or VPN) for a few hours so "
-                      "pending security updates can install automatically.")
+# 'Action'/'Detail' columns. Fixing this needs hands-on IT servicing, so the
+# instruction is to bring the device in - not a self-service fix.
+USER_FACING_ACTION = ("Please bring this device to Tech Hub (11/F, AIA Building) "
+                      "as soon as possible so it can be serviced and brought back "
+                      "into compliance.")
 
 # Host -> assigned-user NAME, from the CMDB export (drop into data/, 'cmdb' in
 # the filename). Join key is 'Name' (hostname); 'Assigned to' is a DISPLAY NAME,
