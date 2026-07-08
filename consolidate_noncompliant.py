@@ -62,6 +62,17 @@ PURVIEW_LATEST = {
 REMEDIATION_DAYS = 5            # SLA from the CrowdStrike email
 FROM_TEAM = "IT Compliance"     # appears in the message signature
 
+# What the END USER is told to do. Deliberately not the per-finding technical
+# 'action' text (sensor versions, Software Center steps, DLP enrollment,
+# ZIA/MOCAMP jargon, CMDB inventory upkeep) - that's for whoever runs this
+# script, and stays fully intact in the Worklist (noncompliant_consolidated.xlsx)
+# 'Action'/'Detail' columns. In practice devices are managed centrally (SCCM/
+# Intune push updates once a device checks in), so the one thing a non-IT
+# recipient can actually do is leave the device powered on and connected.
+USER_FACING_ACTION = ("Please make sure this device is powered on and connected "
+                      "to the network (office Wi-Fi or VPN) for a few hours so "
+                      "pending security updates can install automatically.")
+
 # Host -> assigned-user NAME, from the CMDB export (drop into data/, 'cmdb' in
 # the filename). Join key is 'Name' (hostname); 'Assigned to' is a DISPLAY NAME,
 # not an email - it gets resolved to an address via AD_Users below.
@@ -861,32 +872,27 @@ def resolve_recipient(row: dict, cmdb_names: dict, ad: dict, overrides: dict) ->
 # ===========================================================================
 
 def compose_email(findings: list) -> tuple:
-    by_host = {}
-    for f in findings:
-        by_host.setdefault(f["hostname"], []).append(f)
+    """User-facing message: names the affected device(s) only, no per-source
+    technical detail (issue/action text, CMDB upkeep) - that stays in the
+    Worklist for staff. See USER_FACING_ACTION."""
+    hosts = sorted({f["hostname"] for f in findings})
 
-    subject = f"Action required: {len(by_host)} device(s) need compliance remediation"
+    subject = f"Action required: {len(hosts)} device(s) need a security update"
     lines = ["Hello,", "",
              f"The following device(s) associated with you are currently flagged "
-             f"non-compliant and need remediation within {REMEDIATION_DAYS} business days:", ""]
-    for host, fs in by_host.items():
-        lines.append(f"* {host}  ({fs[0]['platform']} {fs[0]['kind']})")
-        for f in fs:
-            lines.append(f"    - [{f['source']}] {f['issue']}  ->  {f['action']}")
-        lines.append("")
-    lines += ["If a device has been decommissioned or reimaged, please have the "
-              "CMDB inventory updated so it stops appearing on this report.", "",
+             f"non-compliant and need attention within {REMEDIATION_DAYS} business days:", ""]
+    for host in hosts:
+        lines.append(f"* {host}")
+    lines += ["", USER_FACING_ACTION, "",
+              "If you continue to see this notice after doing so, please contact IT Support.", "",
               "Thank you,", FROM_TEAM]
     return subject, "\n".join(lines)
 
 
 def compose_teams(findings: list) -> str:
     hosts = sorted({f["hostname"] for f in findings})
-    items = "; ".join(f"{f['hostname']} ({f['issue']})" for f in findings[:5])
-    more = "" if len(findings) <= 5 else f" (+{len(findings) - 5} more finding(s))"
     return (f"You have {len(hosts)} non-compliant device(s) needing attention within "
-            f"{REMEDIATION_DAYS} business days: {items}{more}. "
-            f"See the email for full remediation steps.")
+            f"{REMEDIATION_DAYS} business days: {', '.join(hosts)}. {USER_FACING_ACTION}")
 
 
 def build_notifications(rows: list, cmdb_names: dict, ad: dict, overrides: dict) -> tuple:
