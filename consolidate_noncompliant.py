@@ -331,7 +331,22 @@ def _heal_headers(headers: list, expected: list, where: str = "") -> list:
     return healed if changed else headers
 
 
+def _require_openpyxl(path: str) -> None:
+    """openpyxl is optional at import time (HAVE_XLSX) so an all-CSV data/
+    directory works without it, but the two call sites that actually touch
+    .xlsx files skipped this check, so a missing openpyxl surfaced as a bare
+    NameError deep in a stack trace the moment an .xlsx file was involved,
+    instead of a message saying what to install."""
+    if not HAVE_XLSX:
+        raise RuntimeError(
+            f"openpyxl is required to read {path!r} but isn't installed in this "
+            f"Python environment (pip install openpyxl, or add it to requirements.txt "
+            f"for this runtime). CSV-only data/ directories work without it."
+        )
+
+
 def _read_xlsx_rows(path: str, sheet: str = None, expected_headers: list = None) -> list:
+    _require_openpyxl(path)
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb[sheet] if sheet else wb.active
     it = ws.iter_rows(values_only=True)
@@ -359,6 +374,7 @@ def _read_any(path: str, sheet: str = None, expected_headers: list = None) -> li
 def _read_headers(path: str, sheet: str = None, expected_headers: list = None) -> list:
     """Just the header row, for the pre-flight column check."""
     if path.lower().endswith(".xlsx"):
+        _require_openpyxl(path)
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
         ws = wb[sheet] if sheet else wb.active
         try:
@@ -637,6 +653,7 @@ def write_worklist(rows: list) -> str:
 def _list_sheets(path: str) -> list:
     if not path.lower().endswith(".xlsx"):
         return [None]
+    _require_openpyxl(path)
     wb = openpyxl.load_workbook(path, read_only=True)
     names = wb.sheetnames
     wb.close()

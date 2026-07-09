@@ -126,3 +126,35 @@ def test_standalone_file_takes_priority_over_a_sheet_match(data_dir):
     path, sheet = cnc.find_dataset("cmdb")
     assert path.endswith("CMDB_Mapping.xlsx")
     assert sheet is None
+
+
+def test_require_openpyxl_raises_clear_error_when_missing(monkeypatch):
+    """Regression: missing openpyxl used to surface as a bare NameError deep
+    in a stack trace (e.g. in a locked-down runtime that doesn't have it
+    installed) instead of a message saying what to install."""
+    monkeypatch.setattr(cnc, "HAVE_XLSX", False)
+    with pytest.raises(RuntimeError, match="openpyxl is required"):
+        cnc._require_openpyxl("some_file.xlsx")
+
+
+def test_require_openpyxl_is_a_noop_when_available(monkeypatch):
+    monkeypatch.setattr(cnc, "HAVE_XLSX", True)
+    cnc._require_openpyxl("some_file.xlsx")  # must not raise
+
+
+def test_read_xlsx_rows_raises_clear_error_not_nameerror_when_openpyxl_missing(
+        data_dir, monkeypatch):
+    path = data_dir / "AIAGO_Workstation_CS.xlsx"
+    openpyxl.Workbook().save(path)
+    monkeypatch.setattr(cnc, "HAVE_XLSX", False)
+    with pytest.raises(RuntimeError, match="openpyxl is required"):
+        cnc._read_xlsx_rows(str(path))
+
+
+def test_list_sheets_raises_clear_error_not_nameerror_when_openpyxl_missing(
+        data_dir, monkeypatch):
+    path = data_dir / "Some_Workbook.xlsx"
+    openpyxl.Workbook().save(path)
+    monkeypatch.setattr(cnc, "HAVE_XLSX", False)
+    with pytest.raises(RuntimeError, match="openpyxl is required"):
+        cnc._list_sheets(str(path))
