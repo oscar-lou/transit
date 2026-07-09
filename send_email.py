@@ -105,13 +105,57 @@ _load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 import consolidate_noncompliant as cnc
 
 # ===========================================================================
+# SECRET SOURCE  (credential/config seam)
+# Every credential/config READ in this file goes through this abstraction
+# instead of calling os.environ directly, so swapping local env vars for a
+# future backend is a contained edit to _get_secret_source() below, not a
+# hunt through every reader. Deliberately NOT part of this seam: _load_dotenv()
+# itself, which POPULATES os.environ from a local .env file - that's the
+# local-only bootstrapping step (parallel to how consolidate_noncompliant.py's
+# mock-data generation stays direct disk I/O, outside its file-read seam),
+# not a credential read. selftest()'s os.environ assignments similarly stay
+# as-is - they're simulating "the environment as it would really be" for an
+# isolated test, not a credential read either.
+# ===========================================================================
+
+class SecretSource:
+    """Abstraction over 'where credentials/config values come from'.
+    LocalEnvSecretSource (below) is the only implementation today. A future
+    KeyVaultSecretSource would implement this same get() method against
+    Azure Key Vault instead - nothing else in this file would need to change."""
+
+    def get(self, key: str):
+        """-> the value for `key`, or None if not set."""
+        raise NotImplementedError
+
+
+class LocalEnvSecretSource(SecretSource):
+    """Reads the process environment - exactly what this file did before
+    this abstraction existed (os.environ, already populated by real env vars
+    and/or _load_dotenv() at import time). Extension point: a future
+    KeyVaultSecretSource would implement get() against Azure Key Vault
+    instead - see SecretSource above."""
+
+    def get(self, key: str):
+        return os.environ.get(key)
+
+
+def _get_secret_source() -> SecretSource:
+    """The single place that decides which SecretSource backs every
+    credential/config read. Constructed fresh on every call (not cached) -
+    mirrors _get_data_source() in consolidate_noncompliant.py. Swapping to a
+    future KeyVaultSecretSource is a one-line change here."""
+    return LocalEnvSecretSource()
+
+
+# ===========================================================================
 # CONFIG
 # ===========================================================================
 
 def _load_max_send() -> int:
     """Default cap is 25, overridable via COMPLIANCE_MAX_SEND (e.g. once real
     rollout steady-state volume regularly exceeds it) without a code change."""
-    raw = os.environ.get("COMPLIANCE_MAX_SEND", "").strip()
+    raw = (_get_secret_source().get("COMPLIANCE_MAX_SEND") or "").strip()
     if not raw:
         return 25
     try:
@@ -204,13 +248,14 @@ def send_one(token: str, sender_upn: str, to_email: str, subject: str, body_html
 
 
 def _load_graph_credentials():
-    missing = [v for v in REQUIRED_GRAPH_ENV if not os.environ.get(v)]
+    source = _get_secret_source()
+    missing = [v for v in REQUIRED_GRAPH_ENV if not source.get(v)]
     if missing:
         print("Refusing to send: missing required environment variable(s):")
         for v in missing:
             print(f"  {v:20s} - {REQUIRED_GRAPH_ENV[v]}")
         return None
-    return {v: os.environ[v] for v in REQUIRED_GRAPH_ENV}
+    return {v: source.get(v) for v in REQUIRED_GRAPH_ENV}
 
 
 # ===========================================================================
@@ -333,7 +378,7 @@ def _run_with_groups(mode: str, groups: dict, review: list, unresolved: list,
 
     test_inbox = None
     if mode == "send-to-self":
-        test_inbox = os.environ.get("COMPLIANCE_TEST_INBOX", "")
+        test_inbox = _get_secret_source().get("COMPLIANCE_TEST_INBOX") or ""
         if not test_inbox or "@" not in test_inbox or "replace" in test_inbox.lower():
             print("Refusing to send: --send-to-self requires the COMPLIANCE_TEST_INBOX "
                   "environment variable set to your real test mailbox address "

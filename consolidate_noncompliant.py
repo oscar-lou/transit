@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import csv
 import html
+import io
 import os
 import sys
 from datetime import datetime, date
@@ -285,9 +286,73 @@ def cell_to_str(v) -> str:
     return str(v).strip()
 
 
-def _read_csv_rows(path: str) -> list:
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        return list(csv.DictReader(f))
+# ===========================================================================
+# DATA SOURCE  (file I/O seam)
+# Every INPUT read in this file goes through this abstraction instead of
+# calling open()/os.listdir() directly, so swapping local disk for a future
+# backend is a contained edit to _get_data_source() below, not a hunt
+# through every reader. Deliberately NOT part of this seam: output writing
+# (write_worklist/write_notifications_preview/write_html_preview) and mock-
+# fixture generation (generate_mock_data/_write_mock) - both stay direct
+# disk I/O for now, same as before this refactor.
+# ===========================================================================
+
+class DataSource:
+    """Abstraction over 'a directory of input report/config files'.
+    LocalDataSource (below) is the only implementation today. A future
+    BlobDataSource would implement these same three methods against Azure
+    Blob Storage instead - nothing else in this file would need to change."""
+
+    def exists(self) -> bool:
+        """-> True if this source is reachable at all (e.g. the local
+        directory exists / the blob container exists)."""
+        raise NotImplementedError
+
+    def list_files(self) -> list:
+        """-> sorted list of file names available. These are logical names
+        (no directory component), not filesystem paths."""
+        raise NotImplementedError
+
+    def read_file(self, name: str) -> bytes:
+        """-> the raw bytes of the named file."""
+        raise NotImplementedError
+
+
+class LocalDataSource(DataSource):
+    """Reads a directory on local disk - exactly what this file did before
+    this abstraction existed (os.listdir() + open().read()), byte for byte.
+    Extension point: a future BlobDataSource(container_client) would
+    implement exists()/list_files()/read_file() against Azure Blob Storage
+    instead - see DataSource above."""
+
+    def __init__(self, directory: str):
+        self.directory = directory
+
+    def exists(self) -> bool:
+        return os.path.isdir(self.directory)
+
+    def list_files(self) -> list:
+        if not self.exists():
+            return []
+        return sorted(os.listdir(self.directory))
+
+    def read_file(self, name: str) -> bytes:
+        with open(os.path.join(self.directory, name), "rb") as f:
+            return f.read()
+
+
+def _get_data_source() -> DataSource:
+    """The single place that decides which DataSource backs every input
+    read. Constructed fresh on every call (not cached at import time) so it
+    always reflects the CURRENT value of DATA_DIR - important because tests
+    (and DATA_DIR itself) can change at runtime. Swapping to a future
+    BlobDataSource is a one-line change here."""
+    return LocalDataSource(DATA_DIR)
+
+
+def _read_csv_rows(name: str) -> list:
+    text = _get_data_source().read_file(name).decode("utf-8-sig")
+    return list(csv.DictReader(io.StringIO(text)))
 
 
 def _looks_like_corruption(value: str) -> bool:
@@ -345,9 +410,10 @@ def _require_openpyxl(path: str) -> None:
         )
 
 
-def _read_xlsx_rows(path: str, sheet: str = None, expected_headers: list = None) -> list:
-    _require_openpyxl(path)
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+def _read_xlsx_rows(name: str, sheet: str = None, expected_headers: list = None) -> list:
+    _require_openpyxl(name)
+    data = _get_data_source().read_file(name)
+    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     ws = wb[sheet] if sheet else wb.active
     it = ws.iter_rows(values_only=True)
     try:
@@ -355,7 +421,7 @@ def _read_xlsx_rows(path: str, sheet: str = None, expected_headers: list = None)
     except StopIteration:
         wb.close()
         return []
-    headers = _heal_headers(headers, expected_headers, where=os.path.basename(path))
+    headers = _heal_headers(headers, expected_headers, where=os.path.basename(name))
     out = []
     for row in it:
         if row is None or all(c is None for c in row):
@@ -365,29 +431,30 @@ def _read_xlsx_rows(path: str, sheet: str = None, expected_headers: list = None)
     return out
 
 
-def _read_any(path: str, sheet: str = None, expected_headers: list = None) -> list:
-    if path.lower().endswith(".xlsx"):
-        return _read_xlsx_rows(path, sheet, expected_headers)
-    return _read_csv_rows(path)
+def _read_any(name: str, sheet: str = None, expected_headers: list = None) -> list:
+    if name.lower().endswith(".xlsx"):
+        return _read_xlsx_rows(name, sheet, expected_headers)
+    return _read_csv_rows(name)
 
 
-def _read_headers(path: str, sheet: str = None, expected_headers: list = None) -> list:
+def _read_headers(name: str, sheet: str = None, expected_headers: list = None) -> list:
     """Just the header row, for the pre-flight column check."""
-    if path.lower().endswith(".xlsx"):
-        _require_openpyxl(path)
-        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    if name.lower().endswith(".xlsx"):
+        _require_openpyxl(name)
+        data = _get_data_source().read_file(name)
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
         ws = wb[sheet] if sheet else wb.active
         try:
             headers = [cell_to_str(h) for h in next(ws.iter_rows(values_only=True))]
         except StopIteration:
             headers = []
         wb.close()
-        return _heal_headers(headers, expected_headers, where=os.path.basename(path))
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        try:
-            return [cell_to_str(h) for h in next(csv.reader(f))]
-        except StopIteration:
-            return []
+        return _heal_headers(headers, expected_headers, where=os.path.basename(name))
+    text = _get_data_source().read_file(name).decode("utf-8-sig")
+    try:
+        return [cell_to_str(h) for h in next(csv.reader(io.StringIO(text)))]
+    except StopIteration:
+        return []
 
 
 # ===========================================================================
@@ -650,11 +717,12 @@ def write_worklist(rows: list) -> str:
 # RECIPIENT RESOLUTION   hostname -> name (CMDB) -> email (AD_Users, fuzzy)
 # ===========================================================================
 
-def _list_sheets(path: str) -> list:
-    if not path.lower().endswith(".xlsx"):
+def _list_sheets(name: str) -> list:
+    if not name.lower().endswith(".xlsx"):
         return [None]
-    _require_openpyxl(path)
-    wb = openpyxl.load_workbook(path, read_only=True)
+    _require_openpyxl(name)
+    data = _get_data_source().read_file(name)
+    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True)
     names = wb.sheetnames
     wb.close()
     return names
@@ -672,7 +740,9 @@ def _list_sheets(path: str) -> list:
 # ===========================================================================
 
 def find_dataset(stem_keyword: str):
-    """-> (path, sheet_name_or_None) for the match, else None.
+    """-> (filename, sheet_name_or_None) for the match, else None. `filename`
+    is a logical name within the active DataSource (see _get_data_source()),
+    not necessarily a filesystem path.
 
     Matching is by substring against filenames first, then sheet tabs inside
     every .xlsx - necessarily loose, since real report filenames carry
@@ -680,9 +750,10 @@ def find_dataset(stem_keyword: str):
     real cost: it can false-positive on an unrelated file/sheet that happens
     to contain the same keyword (e.g. 'dlp' matching a stray meeting-notes
     file). Two things keep that from being a silent, unreproducible surprise:
-      - candidates are scanned in SORTED order, not raw os.listdir() order
-        (which is filesystem/OS-dependent and not guaranteed stable), so the
-        same input directory always resolves the same way on any machine.
+      - candidates are scanned in SORTED order, not whatever order the
+        DataSource happens to return (which, for LocalDataSource, mirrors
+        the filesystem/OS-dependent, not-guaranteed-stable os.listdir()
+        order), so the same input directory always resolves the same way.
       - if MORE THAN ONE file or sheet matches the same keyword, that's
         printed as a warning naming every candidate, even though (to keep
         existing single-match callers working unchanged) the first one is
@@ -692,28 +763,27 @@ def find_dataset(stem_keyword: str):
     surfaces every "no matching file or sheet found" into main()'s end-of-run
     banner rather than letting it stay a single easy-to-miss console line.
     """
-    if not os.path.isdir(DATA_DIR):
+    source = _get_data_source()
+    if not source.exists():
         return None
     key = stem_keyword.lower()
     xlsx_files = []
     filename_matches = []
-    for fn in sorted(os.listdir(DATA_DIR)):
+    for fn in source.list_files():
         if not fn.lower().endswith((".xlsx", ".csv")):
             continue
-        path = os.path.join(DATA_DIR, fn)
         base = os.path.splitext(fn)[0].lower()
         # 1. filename itself matches -> standalone file, own active sheet
         if base.startswith(key) or key in base:
-            filename_matches.append(path)
+            filename_matches.append(fn)
         if fn.lower().endswith(".xlsx"):
-            xlsx_files.append(path)
+            xlsx_files.append(fn)
 
     if filename_matches:
         if len(filename_matches) > 1:
-            others = ", ".join(os.path.basename(p) for p in filename_matches[1:])
+            others = ", ".join(filename_matches[1:])
             print(f"  ! '{stem_keyword}' matches {len(filename_matches)} files in "
-                  f"'{DATA_DIR}/' - using {os.path.basename(filename_matches[0])}, "
-                  f"ignoring: {others}")
+                  f"'{DATA_DIR}/' - using {filename_matches[0]}, ignoring: {others}")
         return filename_matches[0], None
 
     # 2. no filename matched -> look for a matching TAB inside every workbook.
@@ -722,17 +792,17 @@ def find_dataset(stem_keyword: str):
     # sheet-in-key) since tab names are often abbreviated.
     core_key = key.replace("_", "").replace("aiago", "")
     sheet_matches = []
-    for path in xlsx_files:
-        for sheet in _list_sheets(path):
+    for fn in xlsx_files:
+        for sheet in _list_sheets(fn):
             s = (sheet or "").lower().replace(" ", "").replace("_", "")
             if len(s) >= 3 and (core_key in s or s in core_key):
-                sheet_matches.append((path, sheet))
+                sheet_matches.append((fn, sheet))
     if sheet_matches:
         if len(sheet_matches) > 1:
-            others = ", ".join(f"{os.path.basename(p)} [{s}]" for p, s in sheet_matches[1:])
-            first_path, first_sheet = sheet_matches[0]
+            others = ", ".join(f"{fn} [{s}]" for fn, s in sheet_matches[1:])
+            first_fn, first_sheet = sheet_matches[0]
             print(f"  ! '{stem_keyword}' matches {len(sheet_matches)} sheets - using "
-                  f"{os.path.basename(first_path)} [{first_sheet}], ignoring: {others}")
+                  f"{first_fn} [{first_sheet}], ignoring: {others}")
         return sheet_matches[0]
     return None
 
@@ -1339,8 +1409,7 @@ def _warn_if_thresholds_stale() -> bool:
 # ===========================================================================
 
 def _data_dir_has_files() -> bool:
-    return os.path.isdir(DATA_DIR) and any(
-        f.lower().endswith((".xlsx", ".csv")) for f in os.listdir(DATA_DIR))
+    return any(f.lower().endswith((".xlsx", ".csv")) for f in _get_data_source().list_files())
 
 
 def main() -> None:
