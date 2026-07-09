@@ -53,6 +53,17 @@ except ImportError:
 DATA_DIR = os.environ.get("COMPLIANCE_DATA_DIR", "data")
 OUTPUT_DIR = os.environ.get("COMPLIANCE_OUTPUT_DIR", "output")
 
+# These reference versions go stale the moment CrowdStrike/Purview ship a new
+# client - there's no API call here to auto-refresh them. THRESHOLDS_VERIFIED
+# is a manual "confirmed correct as of this date" marker; main() warns loudly
+# once it's more than THRESHOLDS_STALE_AFTER_DAYS old (see
+# _warn_if_thresholds_stale), so staleness gets noticed instead of silently
+# mis-flagging (or failing to flag) real devices indefinitely. Bump both the
+# values below AND this date whenever they're re-checked against the actual
+# current releases.
+THRESHOLDS_VERIFIED = date(2026, 7, 9)
+THRESHOLDS_STALE_AFTER_DAYS = 90
+
 CS_LATEST = {"windows": "7.35.20709", "mac": "7.35.20704", "linux": "7.35.18803"}
 PURVIEW_LATEST = {
     "windows": {"mocamp": "4.18.26040.7", "engine": "1.1.26020.3"},
@@ -279,18 +290,40 @@ def _read_csv_rows(path: str) -> list:
         return list(csv.DictReader(f))
 
 
+def _looks_like_corruption(value: str) -> bool:
+    """True only for values that couldn't plausibly be a deliberate column
+    name - blank, or purely numeric (the actual corruption seen in
+    production: a header cell overwritten with the literal number 0). A
+    value containing any letters (e.g. a genuine rename to 'foo_v2') is left
+    alone - see _heal_headers()."""
+    v = (value or "").strip()
+    if not v:
+        return True
+    try:
+        float(v)
+        return True
+    except ValueError:
+        return False
+
+
 def _heal_headers(headers: list, expected: list, where: str = "") -> list:
     """Recover a header that got clobbered at the source (seen in the wild:
     'proc_cs_version_status' exported as the literal number 0). Only heals a
-    slot when the actual name doesn't match ANY expected column (so a real
-    rename is never touched) and the expected name is otherwise missing
-    entirely from the row (so a genuine reorder is never misaligned)."""
+    slot when: the actual value doesn't look like a plausible column name at
+    all (blank or purely numeric - see _looks_like_corruption; a genuine
+    rename to a real-looking new name is deliberately left alone instead of
+    being silently rewritten back, which would hide that anything changed),
+    the actual name doesn't match ANY expected column (so a rename that's
+    really just two columns swapped is never touched), and the expected name
+    is otherwise missing entirely from the row (so a genuine reorder is never
+    misaligned)."""
     if not expected or len(headers) != len(expected):
         return headers
     healed = list(headers)
     changed = False
     for i, exp in enumerate(expected):
-        if headers[i] != exp and headers[i] not in expected and exp not in headers:
+        if (headers[i] != exp and _looks_like_corruption(headers[i])
+                and headers[i] not in expected and exp not in headers):
             healed[i] = exp
             changed = True
             print(f"  ! header self-heal {where}: column {i} read as {headers[i]!r}; "
@@ -622,31 +655,68 @@ def _list_sheets(path: str) -> list:
 # ===========================================================================
 
 def find_dataset(stem_keyword: str):
-    """-> (path, sheet_name_or_None) for the first match, else None."""
+    """-> (path, sheet_name_or_None) for the match, else None.
+
+    Matching is by substring against filenames first, then sheet tabs inside
+    every .xlsx - necessarily loose, since real report filenames carry
+    timestamp/ticket prefixes this needs to see through. That looseness has a
+    real cost: it can false-positive on an unrelated file/sheet that happens
+    to contain the same keyword (e.g. 'dlp' matching a stray meeting-notes
+    file). Two things keep that from being a silent, unreproducible surprise:
+      - candidates are scanned in SORTED order, not raw os.listdir() order
+        (which is filesystem/OS-dependent and not guaranteed stable), so the
+        same input directory always resolves the same way on any machine.
+      - if MORE THAN ONE file or sheet matches the same keyword, that's
+        printed as a warning naming every candidate, even though (to keep
+        existing single-match callers working unchanged) the first one is
+        still used automatically.
+    This does NOT solve the other real risk - a renamed report simply
+    matching nothing and silently vanishing - which is why validate_headers()
+    surfaces every "no matching file or sheet found" into main()'s end-of-run
+    banner rather than letting it stay a single easy-to-miss console line.
+    """
     if not os.path.isdir(DATA_DIR):
         return None
     key = stem_keyword.lower()
     xlsx_files = []
-    for fn in os.listdir(DATA_DIR):
+    filename_matches = []
+    for fn in sorted(os.listdir(DATA_DIR)):
         if not fn.lower().endswith((".xlsx", ".csv")):
             continue
         path = os.path.join(DATA_DIR, fn)
         base = os.path.splitext(fn)[0].lower()
         # 1. filename itself matches -> standalone file, own active sheet
         if base.startswith(key) or key in base:
-            return path, None
+            filename_matches.append(path)
         if fn.lower().endswith(".xlsx"):
             xlsx_files.append(path)
+
+    if filename_matches:
+        if len(filename_matches) > 1:
+            others = ", ".join(os.path.basename(p) for p in filename_matches[1:])
+            print(f"  ! '{stem_keyword}' matches {len(filename_matches)} files in "
+                  f"'{DATA_DIR}/' - using {os.path.basename(filename_matches[0])}, "
+                  f"ignoring: {others}")
+        return filename_matches[0], None
+
     # 2. no filename matched -> look for a matching TAB inside every workbook.
     # Sheet tabs likely won't carry the "aiago_" file-prefix, so compare with
     # that stripped, and match in either direction (key-in-sheet or
     # sheet-in-key) since tab names are often abbreviated.
     core_key = key.replace("_", "").replace("aiago", "")
+    sheet_matches = []
     for path in xlsx_files:
         for sheet in _list_sheets(path):
             s = (sheet or "").lower().replace(" ", "").replace("_", "")
             if len(s) >= 3 and (core_key in s or s in core_key):
-                return path, sheet
+                sheet_matches.append((path, sheet))
+    if sheet_matches:
+        if len(sheet_matches) > 1:
+            others = ", ".join(f"{os.path.basename(p)} [{s}]" for p, s in sheet_matches[1:])
+            first_path, first_sheet = sheet_matches[0]
+            print(f"  ! '{stem_keyword}' matches {len(sheet_matches)} sheets - using "
+                  f"{os.path.basename(first_path)} [{first_sheet}], ignoring: {others}")
+        return sheet_matches[0]
     return None
 
 
@@ -1231,6 +1301,22 @@ def validate_headers() -> bool:
     return all_ok
 
 
+def _warn_if_thresholds_stale() -> bool:
+    """CS_LATEST/PURVIEW_LATEST are hardcoded reference versions with no way
+    to auto-refresh from here - the only defense against them silently going
+    stale is making staleness itself visible. -> True if stale."""
+    age_days = (date.today() - THRESHOLDS_VERIFIED).days
+    if age_days > THRESHOLDS_STALE_AFTER_DAYS:
+        print(f"  ! CS_LATEST/PURVIEW_LATEST were last verified {age_days} days ago "
+              f"(on {THRESHOLDS_VERIFIED.isoformat()}) - CrowdStrike/Purview have "
+              f"likely shipped newer clients since. Check the current release "
+              f"versions and update CS_LATEST/PURVIEW_LATEST (and THRESHOLDS_VERIFIED) "
+              f"near the top of this file.")
+        print()
+        return True
+    return False
+
+
 # ===========================================================================
 # ENTRY POINT
 # ===========================================================================
@@ -1246,12 +1332,13 @@ def main() -> None:
         generate_mock_data()
         print()
 
-    validate_headers()
+    thresholds_stale = _warn_if_thresholds_stale()
+    preflight_ok = validate_headers()
 
     rows = load_all()
     if not rows:
         print("No rows loaded - check that report files are in data/.")
-        return
+        sys.exit(1)
 
     worklist = write_worklist(rows)
 
@@ -1266,6 +1353,16 @@ def main() -> None:
     print(f"\nConsolidated worklist   -> {worklist}")
     print(f"Notification preview    -> {preview}   (NOTHING SENT)")
     print(f"HTML preview (open in a browser) -> {html_preview}   (NOTHING SENT)")
+
+    if not preflight_ok or thresholds_stale:
+        print("\n" + "!" * 72)
+        if not preflight_ok:
+            print("! Pre-flight check found problem(s) (see 'Pre-flight header check' above) -")
+            print("! this run's output may be missing data for the affected report(s).")
+        if thresholds_stale:
+            print("! CS_LATEST/PURVIEW_LATEST reference versions may be stale (see above).")
+        print("!" * 72)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

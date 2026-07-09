@@ -28,7 +28,8 @@ Safety:
     build_notifications() - never REVIEW or UNRESOLVED. Asserted in code
     (_assert_no_overlap_with_review_or_unresolved), as defense in depth on
     top of build_notifications() already partitioning rows correctly.
-  - MAX_SEND caps recipients per run; --allow-bulk overrides it.
+  - MAX_SEND (default 25, override via COMPLIANCE_MAX_SEND) caps recipients
+    per run; --allow-bulk overrides it for a single run.
   - Every send attempt (sent/failed/skipped) is logged to output/send_log.csv.
   - Idempotency: skips (and logs as skipped) a recipient+finding-set+mode
     already sent successfully today, so re-running doesn't double-email.
@@ -107,7 +108,24 @@ import consolidate_noncompliant as cnc
 # CONFIG
 # ===========================================================================
 
-MAX_SEND = 25  # recipients per run before --allow-bulk is required
+def _load_max_send() -> int:
+    """Default cap is 25, overridable via COMPLIANCE_MAX_SEND (e.g. once real
+    rollout steady-state volume regularly exceeds it) without a code change."""
+    raw = os.environ.get("COMPLIANCE_MAX_SEND", "").strip()
+    if not raw:
+        return 25
+    try:
+        value = int(raw)
+        if value > 0:
+            return value
+    except ValueError:
+        pass
+    print(f"send_email: COMPLIANCE_MAX_SEND={raw!r} isn't a valid positive integer - "
+          f"using the default (25).")
+    return 25
+
+
+MAX_SEND = _load_max_send()  # recipients per run before --allow-bulk is required
 
 GRAPH_TOKEN_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
 GRAPH_SEND_URL = "https://graph.microsoft.com/v1.0/users/{upn}/sendMail"

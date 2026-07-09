@@ -2,8 +2,14 @@
 that PIN a real, demonstrated limitation (substring matching can false-
 positive on an unrelated file, or silently miss a renamed one) rather than
 hiding it - so a future fix to the matching strategy is a deliberate,
-visible change to these tests, not a silent behavior shift.
+visible change to these tests, not a silent behavior shift. What IS fixed:
+when more than one file/sheet matches the same keyword, the result is now
+deterministic (sorted, not raw os.listdir() order) and printed as a warning
+naming every candidate - see test_ambiguous_filename_match_is_deterministic
+and test_ambiguous_match_prints_a_warning.
 """
+import os
+
 import openpyxl
 import pytest
 
@@ -47,13 +53,48 @@ def test_renaming_a_known_file_makes_it_invisible(data_dir):
 
 def test_false_positive_on_coincidental_filename_substring(data_dir):
     """A real, demonstrated risk: short registry keys like 'dlp' match ANY
-    filename containing that substring, even an unrelated file. Whichever
-    file os.listdir() happens to return first for a shared substring wins -
-    not necessarily the real report."""
+    filename containing that substring, even an unrelated file."""
     _write_blank_xlsx(data_dir / "Random_DLP_Meeting_Notes.xlsx")
     found = cnc.find_dataset("dlp")
     assert found is not None
     assert "Random_DLP_Meeting_Notes" in found[0]
+
+
+def test_ambiguous_filename_match_is_deterministic(data_dir):
+    """When two files both match the same keyword, the result must be
+    reproducible (sorted order) rather than whatever os.listdir() happens to
+    return, which is filesystem/OS-dependent and not guaranteed stable."""
+    _write_blank_xlsx(data_dir / "Zeta_DLP_Extra.xlsx")
+    _write_blank_xlsx(data_dir / "Alpha_DLP_Extra.xlsx")
+
+    path1, _ = cnc.find_dataset("dlp")
+    path2, _ = cnc.find_dataset("dlp")
+
+    assert os.path.basename(path1) == "Alpha_DLP_Extra.xlsx", (
+        f"expected the alphabetically-first match, got {os.path.basename(path1)!r}")
+    assert path1 == path2, "REGRESSION: repeated calls resolved to different files"
+
+
+def test_ambiguous_match_prints_a_warning(data_dir, capsys):
+    """More than one candidate for the same keyword must be surfaced, not
+    silently resolved - a human should notice two reports (or an unrelated
+    file) are colliding on the same registry key."""
+    _write_blank_xlsx(data_dir / "Alpha_DLP_Extra.xlsx")
+    _write_blank_xlsx(data_dir / "Beta_DLP_Extra.xlsx")
+
+    cnc.find_dataset("dlp")
+
+    out = capsys.readouterr().out
+    assert "matches 2 files" in out
+    assert "Alpha_DLP_Extra.xlsx" in out
+    assert "Beta_DLP_Extra.xlsx" in out
+
+
+def test_single_match_prints_no_ambiguity_warning(data_dir, capsys):
+    _write_blank_xlsx(data_dir / "AIAGO_Workstation_CS.xlsx")
+    cnc.find_dataset("aiago_workstation_cs")
+    out = capsys.readouterr().out
+    assert "matches" not in out
 
 
 def test_matches_a_sheet_inside_a_multi_tab_workbook(data_dir):

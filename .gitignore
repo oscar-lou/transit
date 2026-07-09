@@ -7,3 +7,8 @@ output/
 __pycache__
 .env
 .venv
+.DS_Store
+
+# Overrides_TEMPLATE.xlsx has no real data (a starter template, not a real
+# report) - explicitly tracked despite the blanket *.xlsx rule above.
+!Overrides_TEMPLATE.xlsx

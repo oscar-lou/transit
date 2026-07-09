@@ -3,12 +3,21 @@ source (a real AIAGO_Workstation_CS.xlsx export had column 8's name replaced
 with the literal number 0).
 """
 import openpyxl
+import pytest
 
 import consolidate_noncompliant as cnc
 
 EXPECTED = ["gis_bu", "hostname", "install_status", "os", "last_seen", "agent_version",
             "proc_agent_installed", "proc_cs_version_status", "proc_agent_reporting",
             "Compliance", "report_date"]
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("0", True), ("123", True), ("-1", True), ("3.14", True), ("", True), (None, True),
+    ("proc_cs_version_status", False), ("b_v2", False), ("0x", False), ("a1", False),
+])
+def test_looks_like_corruption(value, expected):
+    assert cnc._looks_like_corruption(value) is expected
 
 
 def test_heals_the_real_world_corrupted_column():
@@ -43,19 +52,26 @@ def test_skips_when_no_expected_headers_given():
     assert cnc._heal_headers(headers, []) == headers
 
 
-def test_known_limitation_a_genuine_novel_rename_also_gets_healed():
-    """Documents a real, accepted trade-off rather than hiding it: the guard
-    can only tell 'reorder' apart from 'corruption' (both expected names
-    present elsewhere in the row) - it CANNOT tell 'corruption' apart from 'a
-    genuine rename to a brand-new name'. Both look identical: the actual
-    value matches no expected column, and the expected name is otherwise
-    absent from the row. So a deliberate upstream rename ('b' -> 'b_v2')
-    gets silently rewritten back to 'b' here, same as real corruption would.
-    If that ever needs to change, this test should fail first and make the
-    trade-off an explicit decision, not a silent behavior change.
-    """
+def test_genuine_novel_rename_is_left_alone():
+    """Regression for a real, previously-accepted trade-off: a value that
+    still LOOKS like a plausible column name (has letters, e.g. a deliberate
+    upstream rename 'b' -> 'b_v2') must NOT be healed back to the old name -
+    that would silently mask the fact anything changed. Only genuinely
+    corruption-shaped values (blank, or purely numeric - see
+    _looks_like_corruption) get healed; see
+    test_heals_the_real_world_corrupted_column and
+    test_heals_a_blank_corrupted_column below for what still does."""
     expected = ["a", "b", "c"]
     headers = ["a", "b_v2", "c"]
+    assert cnc._heal_headers(headers, expected) == headers, (
+        "REGRESSION: a plausible rename got silently rewritten back to the old name")
+
+
+def test_heals_a_blank_corrupted_column():
+    """Blank is corruption-shaped too (no letters, can't be a real column
+    name), same as the literal-number-0 case already covered above."""
+    expected = ["a", "b", "c"]
+    headers = ["a", "", "c"]
     assert cnc._heal_headers(headers, expected) == expected
 
 
