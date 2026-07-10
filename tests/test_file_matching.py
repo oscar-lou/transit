@@ -15,11 +15,7 @@ import pytest
 
 import consolidate_noncompliant as cnc
 
-
-@pytest.fixture
-def data_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(cnc, "DATA_DIR", str(tmp_path))
-    return tmp_path
+# data_dir fixture lives in conftest.py (shared with test_data_source.py)
 
 
 def _write_blank_xlsx(path) -> None:

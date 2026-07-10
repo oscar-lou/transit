@@ -109,3 +109,47 @@ def test_corrupted_header_end_to_end_still_classifies_correctly(tmp_path):
         f"classification - got issue={rows[0]['issue']!r}")
     assert rows[0]["issue"] != "CrowdStrike status not reported", (
         "REGRESSION: corrupted header caused cs_reason to read as blank")
+
+
+def test_read_headers_does_not_iterate_past_the_header_row(tmp_path, monkeypatch):
+    """Direct, unambiguous proof (not inferred from timing) that
+    _read_headers() still stops after row 1 now that its xlsx-reading logic
+    is shared with _read_xlsx_rows() via _open_xlsx_headers() - guards
+    against a future refactor accidentally making header-only reads consume
+    the whole sheet again. Instruments the real row iterator to COUNT pulls,
+    rather than trusting that 'no code after the return happens to touch
+    it' - if _read_headers() were ever changed to (even accidentally)
+    iterate further, this fails with an exact count, not a vague timing
+    difference."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["col1", "col2"])
+    for i in range(500):
+        ws.append([f"val{i}a", f"val{i}b"])
+    path = tmp_path / "big.xlsx"
+    wb.save(path)
+
+    real_load_workbook = openpyxl.load_workbook
+    pulled = {"count": 0}
+
+    def counting_load_workbook(*args, **kwargs):
+        real_wb = real_load_workbook(*args, **kwargs)
+        real_ws = real_wb.active
+        real_iter_rows = real_ws.iter_rows
+
+        def counting_iter_rows(*a, **k):
+            for row in real_iter_rows(*a, **k):
+                pulled["count"] += 1
+                yield row
+
+        real_ws.iter_rows = counting_iter_rows
+        return real_wb
+
+    monkeypatch.setattr(cnc.openpyxl, "load_workbook", counting_load_workbook)
+    headers = cnc._read_headers(str(path))
+
+    assert headers == ["col1", "col2"]
+    assert pulled["count"] == 1, (
+        f"REGRESSION: _read_headers() pulled {pulled['count']} row(s) from a "
+        f"501-row sheet, expected exactly 1 (the header row) - it's reading "
+        f"past the header again.")

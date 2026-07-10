@@ -410,8 +410,14 @@ def _require_openpyxl(path: str) -> None:
         )
 
 
-def _read_xlsx_rows(name: str, sheet: str = None, expected_headers: list = None) -> list:
-    _require_openpyxl(name)
+def _open_xlsx_headers(name: str, sheet: str, expected_headers: list):
+    """Opens the workbook, selects the sheet, and reads+heals just the
+    header row. -> (workbook, row_iterator, headers). Caller must close
+    `workbook`. `row_iterator` continues from the row AFTER headers, for a
+    caller that wants the data rows too (_read_xlsx_rows) - a caller that
+    only wants headers (_read_headers) can close and return right away
+    without ever touching `row_iterator`, so pulling this logic out into a
+    shared helper does NOT cost reading the rest of the sheet."""
     data = _get_data_source().read_file(name)
     wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     ws = wb[sheet] if sheet else wb.active
@@ -419,9 +425,17 @@ def _read_xlsx_rows(name: str, sheet: str = None, expected_headers: list = None)
     try:
         headers = [cell_to_str(h) for h in next(it)]
     except StopIteration:
+        return wb, it, []
+    headers = _heal_headers(headers, expected_headers, where=os.path.basename(name))
+    return wb, it, headers
+
+
+def _read_xlsx_rows(name: str, sheet: str = None, expected_headers: list = None) -> list:
+    _require_openpyxl(name)
+    wb, it, headers = _open_xlsx_headers(name, sheet, expected_headers)
+    if not headers:
         wb.close()
         return []
-    headers = _heal_headers(headers, expected_headers, where=os.path.basename(name))
     out = []
     for row in it:
         if row is None or all(c is None for c in row):
@@ -438,18 +452,13 @@ def _read_any(name: str, sheet: str = None, expected_headers: list = None) -> li
 
 
 def _read_headers(name: str, sheet: str = None, expected_headers: list = None) -> list:
-    """Just the header row, for the pre-flight column check."""
+    """Just the header row, for the pre-flight column check. Deliberately
+    does not read the rest of the sheet - see _open_xlsx_headers()."""
     if name.lower().endswith(".xlsx"):
         _require_openpyxl(name)
-        data = _get_data_source().read_file(name)
-        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-        ws = wb[sheet] if sheet else wb.active
-        try:
-            headers = [cell_to_str(h) for h in next(ws.iter_rows(values_only=True))]
-        except StopIteration:
-            headers = []
+        wb, it, headers = _open_xlsx_headers(name, sheet, expected_headers)
         wb.close()
-        return _heal_headers(headers, expected_headers, where=os.path.basename(name))
+        return headers
     text = _get_data_source().read_file(name).decode("utf-8-sig")
     try:
         return [cell_to_str(h) for h in next(csv.reader(io.StringIO(text)))]
@@ -805,15 +814,6 @@ def find_dataset(stem_keyword: str):
                   f"{first_fn} [{first_sheet}], ignoring: {others}")
         return sheet_matches[0]
     return None
-
-
-def _find_file(stem: str):
-    """Back-compat wrapper: standalone-file-only lookup (used by report loader,
-    which still assumes each report is its own file unless told otherwise)."""
-    found = find_dataset(stem)
-    if found and found[1] is None:
-        return found[0]
-    return found[0] if found else None
 
 
 def read_cmdb_mapping() -> dict:

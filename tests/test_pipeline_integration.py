@@ -25,10 +25,7 @@ def _run_pipeline():
     return rows, groups, review, unresolved
 
 
-def test_full_pipeline_against_mock_fixtures(tmp_path, monkeypatch):
-    monkeypatch.setattr(cnc, "DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setattr(cnc, "OUTPUT_DIR", str(tmp_path / "output"))
-
+def test_full_pipeline_against_mock_fixtures(data_and_output_dir):
     cnc.generate_mock_data()
     rows, groups, review, unresolved = _run_pipeline()
 
@@ -129,13 +126,10 @@ def test_ambiguous_name_lands_in_review_and_never_in_groups():
         f"expected both tied candidates listed for review, got {cands!r}")
 
 
-def test_write_html_preview_renders_all_recipients(tmp_path, monkeypatch):
+def test_write_html_preview_renders_all_recipients(data_and_output_dir):
     """write_html_preview() must produce a real, openable HTML file covering
     every confidently-resolved recipient - the whole point is being able to
     eyeball the rendered formatting before any real send."""
-    monkeypatch.setattr(cnc, "DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setattr(cnc, "OUTPUT_DIR", str(tmp_path / "output"))
-
     cnc.generate_mock_data()
     rows, groups, review, unresolved = _run_pipeline()
     assert groups, "test fixture sanity check - need at least one recipient"

@@ -44,14 +44,13 @@ def test_read_file_round_trips_binary_xlsx_content(tmp_path):
     assert cnc.LocalDataSource(str(tmp_path)).read_file("book.xlsx") == on_disk
 
 
-def test_get_data_source_reflects_current_data_dir(tmp_path, monkeypatch):
+def test_get_data_source_reflects_current_data_dir(data_dir):
     """_get_data_source() must not cache - it should reflect whatever
     DATA_DIR is set to AT CALL TIME, since tests (and real config changes)
     redirect DATA_DIR at runtime, not at import time."""
-    monkeypatch.setattr(cnc, "DATA_DIR", str(tmp_path))
     source = cnc._get_data_source()
     assert isinstance(source, cnc.LocalDataSource)
-    assert source.directory == str(tmp_path)
+    assert source.directory == str(data_dir)
 
 
 def test_local_data_source_matches_pre_refactor_behavior_end_to_end(tmp_path, monkeypatch):
