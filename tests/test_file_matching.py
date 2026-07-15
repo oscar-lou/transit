@@ -154,3 +154,48 @@ def test_list_sheets_raises_clear_error_not_nameerror_when_openpyxl_missing(
     monkeypatch.setattr(cnc, "HAVE_XLSX", False)
     with pytest.raises(RuntimeError, match="openpyxl is required"):
         cnc._list_sheets(str(path))
+
+
+# ===========================================================================
+# Filename attribution on genuine read failures (corrupted .xlsx, bad-encoding
+# .csv) - distinct from the missing-openpyxl tests above: those fail before
+# ever touching file bytes, these fail while actually reading them, and
+# previously gave zero indication of which file was at fault (confirmed:
+# 'BadZipFile: File is not a zip file' / 'UnicodeDecodeError: ... invalid
+# start byte', neither naming a source, in a directory that can hold 7+
+# input files).
+# ===========================================================================
+
+def test_read_xlsx_rows_raises_with_filename_when_corrupted(data_dir):
+    (data_dir / "AIAGO_Workstation_CS.xlsx").write_bytes(b"not a real xlsx file")
+    with pytest.raises(Exception) as excinfo:
+        cnc._read_xlsx_rows("AIAGO_Workstation_CS.xlsx")
+    assert "AIAGO_Workstation_CS.xlsx" in str(excinfo.value)
+
+
+def test_read_headers_raises_with_filename_when_xlsx_corrupted(data_dir):
+    (data_dir / "AIAGO_Workstation_CS.xlsx").write_bytes(b"not a real xlsx file")
+    with pytest.raises(Exception) as excinfo:
+        cnc._read_headers("AIAGO_Workstation_CS.xlsx")
+    assert "AIAGO_Workstation_CS.xlsx" in str(excinfo.value)
+
+
+def test_read_csv_rows_raises_with_filename_on_bad_encoding(data_dir):
+    (data_dir / "Overrides.csv").write_bytes(b"\xff\xfe\x00\x01bad bytes")
+    with pytest.raises(Exception) as excinfo:
+        cnc._read_csv_rows("Overrides.csv")
+    assert "Overrides.csv" in str(excinfo.value)
+
+
+def test_read_headers_raises_with_filename_on_bad_encoding(data_dir):
+    (data_dir / "Overrides.csv").write_bytes(b"\xff\xfe\x00\x01bad bytes")
+    with pytest.raises(Exception) as excinfo:
+        cnc._read_headers("Overrides.csv")
+    assert "Overrides.csv" in str(excinfo.value)
+
+
+def test_list_sheets_raises_with_filename_when_corrupted(data_dir):
+    (data_dir / "CompliantReport(Working).xlsx").write_bytes(b"not a real xlsx file")
+    with pytest.raises(Exception) as excinfo:
+        cnc._list_sheets("CompliantReport(Working).xlsx")
+    assert "CompliantReport(Working).xlsx" in str(excinfo.value)

@@ -3,24 +3,37 @@
 Non-compliant report -> per-recipient notification builder.
 
 Pipeline:
-  1. Read the several attached .xlsx reports (CrowdStrike + Purview, across
-     workstation / server / Mac), which use different column names for the
-     same things, and reconcile them into ONE canonical worklist.
+  1. Read the several attached .xlsx/.csv reports (CrowdStrike + Purview +
+     Zapp + DLP, across workstation / server / Mac), which use different
+     column names for the same things, and reconcile them into ONE canonical
+     worklist.
   2. Resolve WHO to notify for each finding:
-       - workstation: assigned_to (Purview) -> else CMDB hostname->email lookup
+       - workstation: assigned_to (Purview) -> else CMDB hostname->email
+                      lookup, via AD_Users (name -> email, fuzzy) and
+                      Overrides (manual, authoritative)
        - server:      not notified - servers still appear in the worklist for
                       visibility, but build_notifications() skips them entirely
   3. Consolidate per recipient (one message per person, not one per file) and
      compose an Outlook email + a Teams message.
-  4. STUB the send: write a preview workbook of exactly what would go out.
-     Real Outlook/Teams sending via Microsoft Graph is wired in later, once a
-     service account with Mail.Send (and Teams send) permission exists.
+  4. STUB the send from this script: write a preview workbook of exactly what
+     would go out - nothing here ever sends. Real Outlook sending is a
+     separate, explicit step: see send_email.py, which already implements it
+     in full (dry-run / send-to-self / send-live, with guardrails and an
+     audit log) via Microsoft Graph - the only thing still pending is the
+     external Mail.Send admin-consent grant, not any missing code. Teams
+     sending was never implemented anywhere: compose_teams() below only
+     feeds the preview's 'Teams Message' column, not an actual send path.
 
 Inputs (drop into data/, .xlsx or .csv):
-  - the 5 report files (AIAGO_*_CS.xlsx / AIAGO_*_Purview.xlsx)
-  - a CMDB export named like 'CMDB_Mapping.xlsx' (hostname -> user email) to
-    resolve hosts that carry no assigned_to. Without it, those hosts show up
-    as UNRESOLVED so you know precisely what's missing.
+  - the 5 core report files (AIAGO_*_CS.xlsx / AIAGO_*_Purview.xlsx), plus
+    the DLP and Zapp exports (fuller/additional coverage - see FILE_REGISTRY)
+  - a CMDB export named like 'CMDB_Mapping.xlsx' (hostname -> assigned-user
+    display name) to resolve hosts that carry no assigned_to. Without it,
+    those hosts show up as UNRESOLVED so you know precisely what's missing.
+  - an AD_Users export (display name -> email) to resolve names to emails -
+    without it, nothing can be resolved to an email at all.
+  - an optional Overrides file (name -> email) for the exceptions the fuzzy
+    AD match can't get; always wins when present.
 
 Outputs (in output/):
   - noncompliant_consolidated.xlsx   (Worklist + BU Summary)
@@ -351,7 +364,11 @@ def _get_data_source() -> DataSource:
 
 
 def _read_csv_rows(name: str) -> list:
-    text = _get_data_source().read_file(name).decode("utf-8-sig")
+    raw = _get_data_source().read_file(name)
+    try:
+        text = raw.decode("utf-8-sig")
+    except Exception as e:
+        _reraise_with_filename(name, e)
     return list(csv.DictReader(io.StringIO(text)))
 
 
@@ -410,6 +427,24 @@ def _require_openpyxl(path: str) -> None:
         )
 
 
+def _reraise_with_filename(name: str, exc: Exception) -> None:
+    """Re-raises `exc` with `name` folded into the message, so a read failure
+    deep in openpyxl/csv (e.g. a corrupted .xlsx, or a non-UTF-8 .csv) names
+    the file that caused it instead of a bare 'File is not a zip file' with
+    nothing to locate it by in a headless run reading several input files.
+    Preserves the exact exception type and chains the original via `from exc`
+    - this only changes what the message says, never what failed or whether
+    it's raised at all. UnicodeDecodeError needs its own branch: unlike most
+    exceptions, its constructor takes (encoding, object, start, end, reason)
+    rather than a plain message string, and its str() is generated from those
+    fields - a filename can only be folded in via `reason`."""
+    if isinstance(exc, UnicodeDecodeError):
+        raise UnicodeDecodeError(
+            exc.encoding, exc.object, exc.start, exc.end, f"{name}: {exc.reason}"
+        ) from exc
+    raise type(exc)(f"{name}: {exc}") from exc
+
+
 def _open_xlsx_headers(name: str, sheet: str, expected_headers: list):
     """Opens the workbook, selects the sheet, and reads+heals just the
     header row. -> (workbook, row_iterator, headers). Caller must close
@@ -419,7 +454,10 @@ def _open_xlsx_headers(name: str, sheet: str, expected_headers: list):
     without ever touching `row_iterator`, so pulling this logic out into a
     shared helper does NOT cost reading the rest of the sheet."""
     data = _get_data_source().read_file(name)
-    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except Exception as e:
+        _reraise_with_filename(name, e)
     ws = wb[sheet] if sheet else wb.active
     it = ws.iter_rows(values_only=True)
     try:
@@ -459,7 +497,11 @@ def _read_headers(name: str, sheet: str = None, expected_headers: list = None) -
         wb, it, headers = _open_xlsx_headers(name, sheet, expected_headers)
         wb.close()
         return headers
-    text = _get_data_source().read_file(name).decode("utf-8-sig")
+    raw = _get_data_source().read_file(name)
+    try:
+        text = raw.decode("utf-8-sig")
+    except Exception as e:
+        _reraise_with_filename(name, e)
     try:
         return [cell_to_str(h) for h in next(csv.reader(io.StringIO(text)))]
     except StopIteration:
@@ -731,7 +773,10 @@ def _list_sheets(name: str) -> list:
         return [None]
     _require_openpyxl(name)
     data = _get_data_source().read_file(name)
-    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True)
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True)
+    except Exception as e:
+        _reraise_with_filename(name, e)
     names = wb.sheetnames
     wb.close()
     return names
