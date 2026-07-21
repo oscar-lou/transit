@@ -35,7 +35,9 @@ Safety:
     already sent successfully today, so re-running doesn't double-email.
   - One recipient failing never aborts the run - logged, loop continues.
 
-Auth (env vars only - never hardcoded, never interactive/device-code):
+Auth (never hardcoded, never interactive/device-code) - these are the same
+key names regardless of where they actually come from (see Credential
+backend below):
   GRAPH_TENANT_ID      Azure AD tenant ID
   GRAPH_CLIENT_ID      app registration (client) ID - needs Mail.Send
                        (Application, admin-consented)
@@ -44,9 +46,19 @@ Auth (env vars only - never hardcoded, never interactive/device-code):
                        as a specific mailbox, e.g. compliance-bot@aia.com)
   COMPLIANCE_TEST_INBOX   required for --send-to-self: your own test mailbox
 
-  All of the above can also go in a .env file next to this script (gitignored,
-  never committed) instead of real shell env vars - loaded automatically on
-  import. A real environment variable always takes priority over .env.
+Credential backend (see SecretSource / _get_secret_source()):
+  - Plain env vars (default off Databricks): all of the above can also go in
+    a .env file next to this script (gitignored, never committed) instead of
+    real shell env vars - loaded automatically on import. A real environment
+    variable always takes priority over .env.
+  - Databricks secret scope (auto-selected when DATABRICKS_RUNTIME_VERSION is
+    set, i.e. running on a Databricks cluster/job; force with
+    COMPLIANCE_SECRETS_BACKEND=databricks|env): reads the same key names from
+    a secret scope (default 'compliance-automation', override via
+    COMPLIANCE_DATABRICKS_SECRET_SCOPE) instead of the environment. Requires
+    the optional databricks-sdk package and whatever Databricks auth is
+    already configured for the run (see check_databricks_connection.py to
+    verify that before relying on it).
 
 Run:
   python send_email.py                                          # dry-run (default)
@@ -58,6 +70,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import hashlib
 import html
@@ -70,6 +83,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, datetime
+
+# databricks-sdk is optional (only needed for the Databricks secrets backend
+# below / check_databricks_connection.py) - same reasoning as consolidate_
+# noncompliant.py's HAVE_XLSX: a plain env-var/.env setup must keep working
+# without it, so this is guarded rather than a hard import.
+try:
+    from databricks.sdk import WorkspaceClient
+    HAVE_DATABRICKS_SDK = True
+except ImportError:
+    HAVE_DATABRICKS_SDK = False
 
 # Guarantee consolidate_noncompliant.py (always a sibling of this file) is
 # importable regardless of the caller's cwd or interpreter startup flags -
@@ -120,9 +143,11 @@ import consolidate_noncompliant as cnc
 
 class SecretSource:
     """Abstraction over 'where credentials/config values come from'.
-    LocalEnvSecretSource (below) is the only implementation today. A future
-    KeyVaultSecretSource would implement this same get() method against
-    Azure Key Vault instead - nothing else in this file would need to change."""
+    LocalEnvSecretSource and DatabricksSecretSource (below) are the two
+    implementations today - see _get_secret_source() for which one backs a
+    given run. A future KeyVaultSecretSource would implement this same get()
+    method against Azure Key Vault instead - nothing else in this file would
+    need to change."""
 
     def get(self, key: str):
         """-> the value for `key`, or None if not set."""
@@ -132,19 +157,84 @@ class SecretSource:
 class LocalEnvSecretSource(SecretSource):
     """Reads the process environment - exactly what this file did before
     this abstraction existed (os.environ, already populated by real env vars
-    and/or _load_dotenv() at import time). Extension point: a future
-    KeyVaultSecretSource would implement get() against Azure Key Vault
-    instead - see SecretSource above."""
+    and/or _load_dotenv() at import time)."""
 
     def get(self, key: str):
         return os.environ.get(key)
 
 
+class DatabricksSecretSource(SecretSource):
+    """Reads credentials from a Databricks secret scope, using whatever
+    auth is already available in the execution environment (a notebook's
+    injected context, DATABRICKS_HOST/DATABRICKS_TOKEN env vars, an OAuth
+    service principal, a CLI profile, ...) via the SDK's own "unified
+    authentication" resolution - see
+    https://docs.databricks.com/en/dev-tools/auth.html. This file never
+    picks a specific auth mechanism itself; whatever the workspace admin has
+    actually set up just works, the same way GRAPH_* creds work today
+    whether they come from a real env var or a local .env file.
+
+    `scope` holds the SAME key names LocalEnvSecretSource reads
+    (GRAPH_TENANT_ID, GRAPH_CLIENT_ID, ...), so switching backends via
+    _get_secret_source() doesn't rename anything else in this file. The
+    WorkspaceClient is constructed lazily (only if get() is ever actually
+    called) and cached on this instance, not the module - _get_secret_source()
+    already returns a fresh SecretSource per call, matching
+    _get_data_source()'s pattern in consolidate_noncompliant.py.
+
+    Requires the optional databricks-sdk dependency (HAVE_DATABRICKS_SDK) -
+    _get_secret_source() below only constructs this when that's available.
+    """
+
+    def __init__(self, scope: str):
+        self.scope = scope
+        self._client = None
+        self._warned = False
+
+    def get(self, key: str):
+        if self._client is None:
+            self._client = WorkspaceClient()
+        try:
+            response = self._client.secrets.get_secret(self.scope, key)
+        except Exception as e:
+            if not self._warned:
+                print(f"send_email: could not read Databricks secret scope "
+                      f"{self.scope!r} - {e}")
+                self._warned = True
+            return None
+        if response.value is None:
+            return None
+        # Databricks' GetSecret API returns the value's byte representation
+        # Base64-encoded, not the raw string - see GetSecretResponse.value.
+        return base64.b64decode(response.value).decode("utf-8")
+
+
 def _get_secret_source() -> SecretSource:
     """The single place that decides which SecretSource backs every
     credential/config read. Constructed fresh on every call (not cached) -
-    mirrors _get_data_source() in consolidate_noncompliant.py. Swapping to a
-    future KeyVaultSecretSource is a one-line change here."""
+    mirrors _get_data_source() in consolidate_noncompliant.py.
+
+    Backend selection (override with COMPLIANCE_SECRETS_BACKEND=env or
+    =databricks; auto-detected otherwise): DATABRICKS_RUNTIME_VERSION is set
+    by Databricks itself on every cluster (notebook or job) - its presence is
+    a fact about the runtime, not a guess, so that's what auto-detection
+    keys off. Falls back to LocalEnvSecretSource (with a clear one-line
+    explanation, not a crash) if databricks-sdk isn't installed even though
+    the backend was selected - e.g. an older runtime image - so a missing
+    optional dependency degrades instead of taking the whole run down."""
+    backend = (os.environ.get("COMPLIANCE_SECRETS_BACKEND") or "").strip().lower()
+    if not backend:
+        backend = "databricks" if os.environ.get("DATABRICKS_RUNTIME_VERSION") else "env"
+
+    if backend == "databricks":
+        if not HAVE_DATABRICKS_SDK:
+            print("send_email: COMPLIANCE_SECRETS_BACKEND=databricks (or running inside "
+                  "Databricks) but the databricks-sdk package isn't installed - falling "
+                  "back to environment variables (pip install databricks-sdk to fix).")
+            return LocalEnvSecretSource()
+        scope = os.environ.get("COMPLIANCE_DATABRICKS_SECRET_SCOPE", "compliance-automation")
+        return DatabricksSecretSource(scope)
+
     return LocalEnvSecretSource()
 
 

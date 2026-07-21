@@ -1,0 +1,9 @@
+# Optional: only needed for the Databricks secrets backend (DatabricksSecretSource
+# in send_email.py) and check_databricks_connection.py. Deliberately kept out of
+# requirements.txt - it pulls in a much heavier dependency tree (google-auth,
+# cryptography, protobuf, ...) that the core pipeline, its tests, and the plain
+# env-var/.env credential path never need.
+#
+#   .venv/bin/pip install -r requirements-databricks.txt
+#
+databricks-sdk>=0.30,<1
