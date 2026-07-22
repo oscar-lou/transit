@@ -276,6 +276,38 @@ FILE_REGISTRY = {
                     "zapp_installed", "zapp_missing", "host_name", "compliant", "ageing_30_days",
                     "ageing_60_days", "ageing_90_days", "run_at"],
     },
+    # BitLocker (Windows disk encryption) compliance export - NOT covered by
+    # any of the other reports. Every row here is a Windows notebook (os,
+    # sys_class_name, chassis_type are constant across the real export), so
+    # platform is fixed rather than derived. This export lists EVERY device
+    # (compliant and not) rather than being pre-filtered, so is_compliant_text()
+    # gates it too, on its own 'compliant' column.
+    #
+    # key "encryption" (not "bitlocker") deliberately: find_dataset() matches
+    # by substring against the real filename, e.g.
+    # '20260715-AIAGO-19. Hard Disk Encryption Compliance.csv' - which
+    # contains "encryption" but never "bitlocker" anywhere. See how "dlp" and
+    # "zapp" above are each keyed on a word actually present in their own
+    # real filenames, for the same reason.
+    "encryption": {
+        "meta": {"source": "BitLocker", "platform": "Windows", "kind": "Workstation"},
+        "map": {
+            "bu": "business_unit_code", "hostname": "host_name", "install_status": "install_status",
+            "os": "os", "assigned_to": "assigned_to", "last_seen": "last_discovered",
+            "encryption_status": "encryption_status", "setting_state_summary": "setting_state_summary",
+            "compliance": "compliant", "report_date": "report_date",
+        },
+        "columns": ["name_x", "host_name", "manufacturer", "chassis_type", "model_id", "serial_number",
+                    "company", "assigned_to", "hardware_status", "install_status", "os", "os_domain",
+                    "u_vlan", "u_dr_availability", "u_dr_grouping", "u_security_zone", "sys_class_name",
+                    "last_discovered", "virtual", "u_non_discoverable_ci", "business_unit_code",
+                    "domain_name", "compliance_status", "exemption", "compliance_status_details",
+                    "collection_id", "site_code", "encryption_status", "setting_state_summary",
+                    "advanced_bitlocker_state", "policy_details", "compliant", "report_date",
+                    "intune_compliance_status", "mbam_compliance_status", "cmdb_bu", "gis_bu",
+                    "count_total_encrypted", "total_encrypted", "total_unencrypted", "ageing_30_days",
+                    "ageing_60_days", "ageing_90_days", "run_at"],
+    },
 }
 
 CANON_COLUMNS = [
@@ -565,9 +597,9 @@ def is_compliant_text(value: str) -> bool:
     """True if a source's own 'compliance' column says this row is already
     compliant. The original 5 AIAGO exports are pre-filtered to non-compliant
     rows only (this is always False for them), but the fuller unfiltered
-    exports (Zapp, the merged DLP export) list EVERY device, so normalize_file
-    gates on this before generating a finding - otherwise a compliant device
-    would get reported as a finding too."""
+    exports (Zapp, the merged DLP export, BitLocker) list EVERY device, so
+    normalize_file gates on this before generating a finding - otherwise a
+    compliant device would get reported as a finding too."""
     return (value or "").strip().lower() in ("1", "true", "yes", "compliant")
 
 
@@ -578,6 +610,38 @@ def zapp_issue(zapp_installed: str, zapp_missing: str) -> tuple:
                 "Install Zapp from Software Center; confirm it registers and connects to ZIA")
     return ("Zapp reporting non-compliant",
             "Verify Zapp registration/connectivity; refer to remediation guidance")
+
+
+def bitlocker_issue(encryption_status: str, setting_state_summary: str) -> tuple:
+    """Real data (data/*Hard Disk Encryption Compliance*.csv, 33 non-compliant/
+    blank rows out of 1380) splits into three shapes:
+      - encryption_status='notEncrypted' (4 rows): the clear case - device
+        reports in, drive isn't encrypted.
+      - encryption_status='encrypted' but setting_state_summary='notAssigned'
+        (1 row): encrypted, but the compliance policy itself isn't applied to
+        the device, so its state isn't actually being evaluated.
+      - encryption_status blank (28 rows, the majority): no BitLocker/Intune
+        telemetry at all for this host, matching CrowdStrike's own
+        'status not reported' shape for the same root cause (host not
+        reporting in) - see cs_issue().
+    """
+    enc = (encryption_status or "").strip().lower()
+    summ = (setting_state_summary or "").strip().lower()
+    if enc == "notencrypted":
+        return ("BitLocker drive encryption not enabled",
+                "Enable BitLocker drive encryption on this device (Settings > Device "
+                "encryption, or via Software Center) and confirm the recovery key "
+                "escrows to Intune")
+    if not enc:
+        return ("BitLocker status not reported",
+                "Verify Intune/MBAM reporting is active on this host; refer to "
+                "remediation guidance")
+    if summ == "notassigned":
+        return ("BitLocker encrypted but compliance policy not applied",
+                "Confirm the BitLocker compliance policy is assigned to this device in Intune")
+    return (f"BitLocker status: encryption={encryption_status or 'n/a'}, "
+            f"setting={setting_state_summary or 'n/a'}",
+            "Refer to remediation guidance")
 
 
 # ===========================================================================
@@ -651,6 +715,10 @@ def normalize_file(path: str, sheet: str = None, registry_key: str = None) -> li
             detail = (f"installed={f.get('zapp_installed') or 'n/a'}, "
                       f"missing={f.get('zapp_missing') or 'n/a'}, "
                       f"version={f.get('zapp_version') or 'n/a'}")
+        elif meta["source"] == "BitLocker":
+            issue, action = bitlocker_issue(f.get("encryption_status"), f.get("setting_state_summary"))
+            detail = (f"encryption={f.get('encryption_status') or 'n/a'}, "
+                      f"setting={f.get('setting_state_summary') or 'n/a'}")
         else:
             issue, action, detail = purview_issue(
                 f.get("config_status"), f.get("policy_status"),
@@ -1345,6 +1413,30 @@ def generate_mock_data() -> None:
              "install_status": "Installed", "os": "Windows 11 24H2", "sys_class_name": "Computer",
              "purview_configuration_status": "Updated", "purview_policy_status": "Updated",
              "purview_last_seen": "2026-06-29", "compliance": "Compliant", "report_date": RD},
+        ])
+
+    # BitLocker (Hard Disk Encryption Compliance) export - shapes taken
+    # directly from the real file's actual non-compliant rows (see
+    # bitlocker_issue()'s docstring for the full breakdown).
+    _write_mock("Hard_Disk_Encryption_Compliance", FILE_REGISTRY["encryption"]["columns"],
+        [
+            # compliant device in this UNFILTERED export -> must be skipped
+            {"host_name": "WS-APAC-008", "business_unit_code": "APAC-Retail", "assigned_to": "Wong, Siu Ming",
+             "install_status": "Installed", "os": "Windows 11 Enterprise", "encryption_status": "encrypted",
+             "setting_state_summary": "compliant", "compliant": "Compliant",
+             "last_discovered": "2026-07-10 12:00:00", "report_date": RD},
+            # the clearest real-world non-compliant shape: reports in, drive
+            # explicitly not encrypted
+            {"host_name": "WS-APAC-009", "business_unit_code": "APAC-Retail", "assigned_to": "Wong, Siu Ming",
+             "install_status": "Installed", "os": "Windows 11 Enterprise", "encryption_status": "notEncrypted",
+             "setting_state_summary": "compliant", "compliant": "Non-compliant",
+             "last_discovered": "2026-06-15 09:30:00", "report_date": RD},
+            # the majority real-world non-compliant shape: no BitLocker/Intune
+            # telemetry reported at all
+            {"host_name": "WS-APAC-010", "business_unit_code": "APAC-Retail", "assigned_to": "Chan, Tai Man Terry",
+             "install_status": "Installed", "os": "Windows 11 Enterprise", "encryption_status": "",
+             "setting_state_summary": "", "compliant": "Non-compliant",
+             "last_discovered": "", "report_date": RD},
         ])
 
     # CMDB export: hostname ('Name') -> assigned user DISPLAY NAME ('Assigned to').

@@ -105,6 +105,37 @@ def test_zapp_issue_other_noncompliance():
     assert issue == "Zapp reporting non-compliant"
 
 
+# --- bitlocker_issue --------------------------------------------------------
+# Shapes pinned directly from the real file's actual non-compliant rows
+# (data/*Hard Disk Encryption Compliance*.csv) - see bitlocker_issue()'s
+# docstring for the full breakdown of which shape is how common.
+
+def test_bitlocker_issue_not_encrypted():
+    """The clearest real shape (4/33 non-compliant rows): reports in, drive
+    explicitly not encrypted."""
+    issue, action = cnc.bitlocker_issue("notEncrypted", "compliant")
+    assert issue == "BitLocker drive encryption not enabled"
+
+
+def test_bitlocker_issue_no_telemetry_reported():
+    """The majority real shape (28/33 non-compliant rows): no BitLocker/Intune
+    telemetry at all - blank encryption_status regardless of setting_state_summary."""
+    issue, action = cnc.bitlocker_issue("", "")
+    assert issue == "BitLocker status not reported"
+
+
+def test_bitlocker_issue_encrypted_but_policy_not_assigned():
+    """The one real row shaped this way: encrypted, but the compliance
+    policy itself was never assigned to the device."""
+    issue, action = cnc.bitlocker_issue("encrypted", "notAssigned")
+    assert issue == "BitLocker encrypted but compliance policy not applied"
+
+
+def test_bitlocker_issue_unrecognized_status_falls_through():
+    issue, action = cnc.bitlocker_issue("SomeNewStatus", "SomeNewSetting")
+    assert "SomeNewStatus" in issue
+
+
 # --- _platform_from_os ------------------------------------------------------
 
 @pytest.mark.parametrize("text,expected", [

@@ -54,6 +54,22 @@ def test_full_pipeline_against_mock_fixtures(data_and_output_dir):
         "REGRESSION: DLP's Compliant row (WS-APAC-007) was not gated out - "
         "is_compliant_text() gating broke for the DLP source")
 
+    # BitLocker's compliant mock row (WS-APAC-008, compliant="Compliant") must
+    # likewise be gated out before it ever becomes a finding.
+    assert not any(r["hostname"] == "WS-APAC-008" for r in rows), (
+        "REGRESSION: BitLocker's Compliant row (WS-APAC-008) was not gated out - "
+        "is_compliant_text() gating broke for the BitLocker source")
+
+    # BitLocker's two non-compliant shapes must each become a finding with the
+    # right issue text - not just "any finding".
+    bitlocker_rows = [r for r in rows if r["source"] == "BitLocker"]
+    assert any(r["hostname"] == "WS-APAC-009"
+               and r["issue"] == "BitLocker drive encryption not enabled"
+               for r in bitlocker_rows), "WS-APAC-009 (notEncrypted) misclassified"
+    assert any(r["hostname"] == "WS-APAC-010"
+               and r["issue"] == "BitLocker status not reported"
+               for r in bitlocker_rows), "WS-APAC-010 (no telemetry) misclassified"
+
     # Servers must never reach groups/review/unresolved.
     server_hosts = {"SRV-EMEA-DB01", "SRV-AMS-APP3", "SRV-EMEA-VDI9"}
     assert not any(r["hostname"] in server_hosts for g in groups.values() for r in g["rows"])

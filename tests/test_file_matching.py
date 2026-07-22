@@ -26,6 +26,20 @@ def _write_blank_xlsx(path) -> None:
     openpyxl.Workbook().save(path)
 
 
+def test_bitlocker_registry_key_matches_real_filename(data_dir):
+    """The real BitLocker export is named
+    '20260715-AIAGO-19. Hard Disk Encryption Compliance.csv' - it never
+    contains the word 'bitlocker' anywhere, which is exactly why
+    FILE_REGISTRY's key for it is 'encryption', not 'bitlocker' (see the
+    comment on that registry entry). Pins that the chosen key actually
+    matches the real filename, not just a hypothetical one."""
+    (data_dir / "20260715-AIAGO-19. Hard Disk Encryption Compliance.csv").write_text("h1,h2\n")
+    path, sheet = cnc.find_dataset("encryption")
+    assert path is not None, "REGRESSION: registry key no longer matches the real filename"
+    assert "Hard Disk Encryption Compliance" in path
+    assert sheet is None
+
+
 def test_matches_by_filename_substring(data_dir):
     _write_blank_xlsx(data_dir / "AIAGO_Workstation_CS.xlsx")
     path, sheet = cnc.find_dataset("aiago_workstation_cs")
