@@ -49,8 +49,12 @@ from __future__ import annotations
 import csv
 import html
 import io
+import json
 import os
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, date
 
 try:
@@ -344,9 +348,10 @@ def cell_to_str(v) -> str:
 
 class DataSource:
     """Abstraction over 'a directory of input report/config files'.
-    LocalDataSource (below) is the only implementation today. A future
-    BlobDataSource would implement these same three methods against Azure
-    Blob Storage instead - nothing else in this file would need to change."""
+    LocalDataSource and SharePointDataSource (below) are the two
+    implementations today - see _get_data_source() for which one actually
+    backs a run (currently always LocalDataSource - SharePointDataSource
+    exists and is tested, but isn't wired in as active anywhere yet)."""
 
     def exists(self) -> bool:
         """-> True if this source is reachable at all (e.g. the local
@@ -386,12 +391,168 @@ class LocalDataSource(DataSource):
             return f.read()
 
 
+# ===========================================================================
+# SHAREPOINT DATA SOURCE  (mock-tested only - see class docstring)
+# Small, mockable Graph HTTP helpers, same shape as send_email.py's
+# _get_graph_token()/_graph_send_mail() (raw urllib, no new dependency).
+# Duplicated in miniature rather than imported from send_email.py:
+# send_email.py already imports consolidate_noncompliant.py, so the reverse
+# import would be circular, and this file's token helper deliberately takes
+# `scope` as a parameter (see get_graph_token_for_scope()) where
+# send_email.py's hardcodes Mail.Send's '.default' - a SharePoint-reading
+# app registration is not necessarily the same one, or the same granted
+# permission.
+# ===========================================================================
+
+GRAPH_TOKEN_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
+
+
+def get_graph_token_for_scope(tenant_id: str, client_id: str, client_secret: str,
+                               scope: str = "https://graph.microsoft.com/.default") -> str:
+    """Client-credentials Graph token fetch. `scope` is a parameter, not a
+    given: don't assume send_email.py's Mail.Send-scoped token (or that
+    app registration) also covers Sites.Selected/Files.Read.All - whatever
+    app registration/permission actually ends up granted for file reads may
+    be entirely separate."""
+    data = urllib.parse.urlencode({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scope": scope,
+        "grant_type": "client_credentials",
+    }).encode()
+    req = urllib.request.Request(GRAPH_TOKEN_URL.format(tenant=tenant_id), data=data, method="POST")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        payload = json.loads(resp.read().decode())
+    return payload["access_token"]
+
+
+def _graph_get_bytes(url: str, token: str) -> bytes:
+    """Raw authenticated GET -> response bytes. The one HTTP primitive both
+    _graph_list_children() and _graph_download_content() build on, so both
+    are easily mockable in tests without ever making a real call."""
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read()
+
+
+def _graph_list_children(drive_id: str, path: str, token: str) -> list:
+    """-> list of Graph driveItem dicts (each has at least 'name' and either
+    'folder' or 'file') for the children of `path` within `drive_id`. Single
+    page only - real folder/file counts here (a handful of dated subfolders,
+    a handful of report files per day) are small enough that this hasn't
+    needed @odata.nextLink pagination handling; flagged here rather than
+    silently assumed away, since there's no live data yet to confirm that."""
+    url = (f"{GRAPH_BASE_URL}/drives/{drive_id}/root:/"
+           f"{urllib.parse.quote(path, safe='/')}:/children")
+    payload = json.loads(_graph_get_bytes(url, token).decode())
+    return payload.get("value", [])
+
+
+def _graph_download_content(drive_id: str, path: str, token: str) -> bytes:
+    url = (f"{GRAPH_BASE_URL}/drives/{drive_id}/root:/"
+           f"{urllib.parse.quote(path, safe='/')}:/content")
+    return _graph_get_bytes(url, token)
+
+
+class SharePointDataSource(DataSource):
+    """Reads report files from a SharePoint document library via Microsoft
+    Graph, resolving the latest dated (YYYY/MM/DD) subfolder under a base
+    path DYNAMICALLY rather than assuming any particular date or cadence -
+    new folders appear irregularly (usually weekly, no guaranteed day of the
+    week), so hardcoding today's date or a fixed weekday offset would
+    silently miss folders, or worse, silently read a stale one. See
+    _resolve_latest_dated_folder().
+
+    NOT wired in anywhere as the active DataSource - _get_data_source()
+    below still only ever returns LocalDataSource. There is no live
+    Sites.Selected/Files.Read.All grant yet, so this class is mock-tested
+    only (every test replaces _graph_list_children/_graph_download_content,
+    never makes a real HTTP call) - built and ready to activate the moment
+    that grant lands, same shape as send_email.py's DatabricksSecretSource.
+
+    drive_id: the target document library's Graph drive ID. Not resolved
+    from a site hostname/path here, since which site this actually lives on
+    isn't confirmed yet either - supply it directly once it is.
+    base_path: the folder ABOVE the YYYY/MM/DD structure, e.g.
+    'Documents/Reports-Prod/AIAGO/Weekly Dashboard/17. Workstation Security
+    Agent Deployment' - taken exactly as given, no assumption about whether
+    a leading 'Documents/' needs stripping.
+    get_token: zero-arg callable -> a valid Graph access token. An opaque
+    injection point deliberately, not a call to get_graph_token_for_scope()
+    itself - so this class never assumes which tenant/app-registration/scope
+    actually ends up with the read permission; the caller decides.
+    """
+
+    def __init__(self, drive_id: str, base_path: str, get_token):
+        self.drive_id = drive_id
+        self.base_path = base_path.strip("/")
+        self._get_token = get_token
+        self._folder = None
+
+    def _latest_numeric_subfolder(self, path: str) -> str:
+        """-> the name of `path`'s numeric-named FOLDER child with the
+        highest INTEGER value - e.g. among ['9', '10'] -> '10', not '9',
+        which a plain string/alphabetical sort would wrongly prefer (the
+        exact unpadded-name edge case this must not get wrong). Raises if no
+        numeric-named folder exists, so a genuinely unexpected structure
+        surfaces as a clear error instead of silently resolving to nothing."""
+        children = _graph_list_children(self.drive_id, path, self._get_token())
+        numeric = [c["name"] for c in children
+                   if c.get("folder") is not None and c.get("name", "").isdigit()]
+        if not numeric:
+            raise RuntimeError(
+                f"SharePoint: no numeric (dated) subfolder found under {path!r} - "
+                f"found: {[c.get('name') for c in children] or '(empty)'}")
+        return max(numeric, key=int)
+
+    def _resolve_latest_dated_folder(self) -> str:
+        """-> full path to the latest YYYY/MM/DD folder under self.base_path.
+        Three separate 'list children, pick the max' calls - year, then
+        month within that year, then day within that month - never a guess,
+        never today's date, never an assumed cadence."""
+        year = self._latest_numeric_subfolder(self.base_path)
+        year_path = f"{self.base_path}/{year}"
+        month = self._latest_numeric_subfolder(year_path)
+        month_path = f"{year_path}/{month}"
+        day = self._latest_numeric_subfolder(month_path)
+        return f"{month_path}/{day}"
+
+    def _resolved_folder(self) -> str:
+        """Resolved lazily on first use (not in __init__) and cached for
+        this instance's lifetime - matches DatabricksSecretSource's lazy,
+        per-instance client caching in send_email.py. _get_data_source()
+        already constructs a fresh DataSource per call, so a fresh
+        SharePointDataSource re-resolves the latest folder next time too."""
+        if self._folder is None:
+            self._folder = self._resolve_latest_dated_folder()
+        return self._folder
+
+    def exists(self) -> bool:
+        try:
+            self._resolved_folder()
+            return True
+        except Exception:
+            return False
+
+    def list_files(self) -> list:
+        folder = self._resolved_folder()
+        children = _graph_list_children(self.drive_id, folder, self._get_token())
+        return sorted(c["name"] for c in children if c.get("file") is not None)
+
+    def read_file(self, name: str) -> bytes:
+        folder = self._resolved_folder()
+        return _graph_download_content(self.drive_id, f"{folder}/{name}", self._get_token())
+
+
 def _get_data_source() -> DataSource:
     """The single place that decides which DataSource backs every input
     read. Constructed fresh on every call (not cached at import time) so it
     always reflects the CURRENT value of DATA_DIR - important because tests
-    (and DATA_DIR itself) can change at runtime. Swapping to a future
-    BlobDataSource is a one-line change here."""
+    (and DATA_DIR itself) can change at runtime. Always LocalDataSource today;
+    switching to SharePointDataSource (already built and tested - see its
+    class docstring) once its Graph permission grant lands is a one-line
+    change here, not a hunt through every reader."""
     return LocalDataSource(DATA_DIR)
 
 
