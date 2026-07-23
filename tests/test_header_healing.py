@@ -1,6 +1,6 @@
 """Tests for _heal_headers() - recovers a header cell corrupted at the
-source (a real AIAGO_Workstation_CS.xlsx export had column 8's name replaced
-with the literal number 0).
+source (a real CrowdStrike workstation export once had a column's name
+replaced with the literal number 0).
 """
 import openpyxl
 import pytest
@@ -76,39 +76,54 @@ def test_heals_a_blank_corrupted_column():
 
 
 def test_corrupted_header_end_to_end_still_classifies_correctly(tmp_path):
-    """Drives a genuinely corrupted xlsx (column 8's header replaced with the
-    literal number 0, exactly as seen in production) through the FULL read
-    path - _read_xlsx_rows -> normalize_file -> cs_issue - and asserts the
-    resulting finding is classified correctly, not blank. The heal function
-    itself is already pinned in isolation above; this pins the downstream
-    result, so a change that breaks the wiring between healing and
-    classification (not just the heal itself) would be caught here.
+    """Drives a genuinely corrupted xlsx (a header cell replaced with the
+    literal number 0, exactly as seen in production for this file family)
+    through the FULL read path - _read_xlsx_rows -> normalize_file ->
+    cs_issue - and asserts the resulting finding is classified correctly,
+    not blank. The heal function itself is already pinned in isolation
+    above; this pins the downstream result, so a change that breaks the
+    wiring between healing and classification (not just the heal itself)
+    would be caught here.
 
-    Uses FILE_REGISTRY's own column list (not the local EXPECTED constant)
-    so this test can't silently drift from what normalize_file() actually
-    expects.
+    Uses FILE_REGISTRY's own column list (not a local constant) so this
+    test can't silently drift from what normalize_file() actually expects.
+    Corrupts the 'crowdstrike' column specifically - the one actually
+    mapped to agent_installed and driving classification for this source
+    (see the "crowdstrike" FILE_REGISTRY entry).
     """
-    columns = cnc.FILE_REGISTRY["aiago_workstation_cs"]["columns"]
+    columns = cnc.FILE_REGISTRY["crowdstrike"]["columns"]
     corrupted_headers = list(columns)
-    corrupted_headers[7] = 0  # literal int, matching the real corruption openpyxl reads back
-    data_row = ["AIAGO", "HHOWKLC-TEST01", "Installed", "Windows 11 Enterprise",
-                "2026-07-01", "7.30.10", "Yes", "Outdated", "Yes", "Non-Compliant", "2026-07-01"]
+    corrupt_at = columns.index("crowdstrike")
+    corrupted_headers[corrupt_at] = 0  # literal int, matching the real corruption openpyxl reads back
+
+    values_by_column = {
+        "hostname": "HHOWKLC-TEST01", "business_unit_code": "AIAGO", "manufacturer": "Lenovo",
+        "chassis_type": "Notebook", "model_id": "X1", "serial_number": "SN1",
+        "company": "AIA Group Office", "assigned_to": "Test User", "hardware_status": "Installed",
+        "install_status": "Installed", "os": "Windows 11 Enterprise", "os_domain": "AIA.BIZ",
+        "u_vlan": "", "u_dr_availability": "", "u_dr_grouping": "", "u_security_zone": "",
+        "sys_class_name": "Computer", "last_discovered": "2026-07-01 00:00:00",
+        "business_unit": "", "virtual": "0", "u_non_discoverable_ci": "",
+        "crowdstrike_required": "Yes", "crowdstrike": "No", "agent_version": "",
+        "report_date": "2026-07-01", "crowdstrike_installed": "0", "host_name": "HHOWKLC-TEST01",
+        "compliant": "0", "ageing_30_days": "0", "ageing_60_days": "0", "ageing_90_days": "0",
+        "last_seen": "2026-07-01 00:00:00", "run_at": "2026-07-01",
+    }
+    data_row = [values_by_column[c] for c in columns]
 
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.append(corrupted_headers)
     ws.append(data_row)
-    path = tmp_path / "AIAGO_Workstation_CS.xlsx"
+    path = tmp_path / "Crowdstrike_Deployment.xlsx"
     wb.save(path)
 
-    rows = cnc.normalize_file(str(path), registry_key="aiago_workstation_cs")
+    rows = cnc.normalize_file(str(path), registry_key="crowdstrike")
 
     assert len(rows) == 1, f"expected exactly one normalized row, got {rows!r}"
-    assert rows[0]["issue"] == "CrowdStrike agent outdated", (
+    assert rows[0]["issue"] == "CrowdStrike agent not installed", (
         f"REGRESSION: header self-heal did not propagate to correct "
         f"classification - got issue={rows[0]['issue']!r}")
-    assert rows[0]["issue"] != "CrowdStrike status not reported", (
-        "REGRESSION: corrupted header caused cs_reason to read as blank")
 
 
 def test_read_headers_does_not_iterate_past_the_header_row(tmp_path, monkeypatch):

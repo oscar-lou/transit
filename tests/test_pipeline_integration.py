@@ -5,13 +5,17 @@ in the past. Automates that manual "run --regen and eyeball the output"
 workflow into assertions, so a future change can't silently reintroduce one
 of the bugs already found and fixed:
   - the Terry-SP/Terry-CP Lau overlap-ranking bug
-  - Zapp/DLP's unfiltered-export compliance gating
-  - the DLP/Purview cross-source dedup
-  - servers staying in the worklist but out of notifications
+  - Zapp/DLP/CrowdStrike/BitLocker's unfiltered-export compliance gating
+
+Server-kind coverage (worklist-only, never notified) no longer has a mock-
+fixture source - the old aiago_server_cs entry relied on a file that no
+longer exists under the current dated-CSV naming convention and was removed,
+not merely renamed (see the "crowdstrike" FILE_REGISTRY comment). That
+behavior itself is still directly covered at the unit level, independent of
+any mock fixture, by test_build_notifications_skips_server_rows_directly
+below.
 """
 import os
-
-import openpyxl
 
 import consolidate_noncompliant as cnc
 
@@ -36,14 +40,15 @@ def test_full_pipeline_against_mock_fixtures(data_and_output_dir):
     zapp_hosts = {r["hostname"] for g in groups.values() for r in g["rows"] if r["source"] == "Zapp"}
     assert "WS-EMEA-030" not in zapp_hosts
 
-    # DLP dedup: WS-APAC-001 has the same finding in both AIAGO_Windows_Purview
-    # and DLP_Deployment mocks - must be counted once, not twice.
-    ws001_purview = [r for g in groups.values() for r in g["rows"]
-                     if r["hostname"] == "WS-APAC-001" and r["source"] == "Purview"]
-    assert len(ws001_purview) == 1
+    # WS-APAC-001 has findings from THREE different sources (CrowdStrike,
+    # Zapp, Purview/DLP) - all must survive (dedup is keyed on (hostname,
+    # source), so different sources for the same host are never deduped
+    # against each other) and consolidate into ONE email, not one per source.
+    ws001_sources = {r["source"] for g in groups.values() for r in g["rows"] if r["hostname"] == "WS-APAC-001"}
+    assert ws001_sources == {"CrowdStrike", "Zapp", "Purview"}, (
+        f"expected WS-APAC-001 to carry findings from all three sources, got {ws001_sources!r}")
 
-    # DLP-only host (WS-APAC-006, never in the thinner Purview exports) must
-    # still be picked up.
+    # DLP-only host (WS-APAC-006, no CrowdStrike finding) must still be picked up.
     assert any(r["hostname"] == "WS-APAC-006"
                for g in groups.values() for r in g["rows"])
 
@@ -70,18 +75,21 @@ def test_full_pipeline_against_mock_fixtures(data_and_output_dir):
                and r["issue"] == "BitLocker status not reported"
                for r in bitlocker_rows), "WS-APAC-010 (no telemetry) misclassified"
 
-    # Servers must never reach groups/review/unresolved.
-    server_hosts = {"SRV-EMEA-DB01", "SRV-AMS-APP3", "SRV-EMEA-VDI9"}
-    assert not any(r["hostname"] in server_hosts for g in groups.values() for r in g["rows"])
-    assert not any(r["hostname"] in server_hosts for r, how, cands in review)
-    assert not any(r["hostname"] in server_hosts for r, how in unresolved)
+    # CrowdStrike's compliant mock row (WS-APAC-011, compliant="1") must be
+    # gated out too - this source is unfiltered under the current real schema
+    # (unlike the old, pre-filtered aiago_workstation_cs export it replaced).
+    assert not any(r["hostname"] == "WS-APAC-011" for r in rows), (
+        "REGRESSION: CrowdStrike's compliant row (WS-APAC-011) was not gated out - "
+        "is_compliant_text() gating broke for the CrowdStrike source")
 
-    # ...but servers DO still appear in the worklist for visibility.
-    worklist_path = cnc.write_worklist(rows)
-    wb = openpyxl.load_workbook(worklist_path, read_only=True, data_only=True)
-    ws = wb["Worklist"]
-    worklist_hostnames = {row[1] for row in ws.iter_rows(values_only=True, min_row=2)}
-    assert server_hosts <= worklist_hostnames
+    # CrowdStrike's non-compliant rows all share the same real shape (agent
+    # not installed - the only one observed in the real data) and must
+    # classify accordingly.
+    crowdstrike_rows = [r for r in rows if r["source"] == "CrowdStrike"]
+    assert crowdstrike_rows, "test fixture sanity check - need at least one CrowdStrike finding"
+    assert all(r["issue"] == "CrowdStrike agent not installed" for r in crowdstrike_rows), (
+        f"REGRESSION: unexpected CrowdStrike issue text(s): "
+        f"{ {r['issue'] for r in crowdstrike_rows} }")
 
 
 def test_build_notifications_skips_server_rows_directly():

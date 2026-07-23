@@ -150,86 +150,59 @@ NOTIFY_CONFIDENCE = {"high", "medium"}
 # replaced with the literal number 0) - see _heal_headers(). Also doubles as
 # the header row generate_mock_data() writes, so mock and prod can't drift.
 FILE_REGISTRY = {
-    "aiago_workstation_cs": {
+    # Real file: '20260715_AIAGO-17. Workstation Security Agent Deployment-
+    # Crowdstrike.csv'. key "crowdstrike" (not "aiago_workstation_cs")
+    # deliberately - same reasoning as "dlp"/"zapp"/"encryption" below:
+    # find_dataset() matches by substring against the real filename, which
+    # contains "crowdstrike" but never "aiago_workstation_cs".
+    #
+    # This export lists EVERY device (Windows workstations only - confirmed:
+    # os/sys_class_name/chassis_type show zero Mac or Server rows), not just
+    # non-compliant ones, so is_compliant_text() gates it here too, on its
+    # own 'compliant' column. That column only reflects install presence
+    # (crowdstrike_installed), not version currency - a real, small gap
+    # (2 of 1519 real rows run a clearly outdated agent_version but are
+    # still marked compliant) that was confirmed and deliberately accepted
+    # rather than "fixed" by comparing agent_version against CS_LATEST:
+    # 468 other rows already run a NEWER build (7.36.20805.0) than CS_LATEST
+    # (7.35.20709), meaning CS_LATEST itself is stale - comparing against it
+    # directly would falsely flag those 468 as outdated instead.
+    #
+    # There is no separate Mac-CrowdStrike or Server-CrowdStrike export under
+    # the current (dated-CSV) naming convention - the old aiago_mac_cs/
+    # aiago_server_cs entries (and aiago_windows_purview/aiago_mac_purview,
+    # see the "dlp" entry below) relied on differently-named/schemaed files
+    # that no longer exist and have been removed, not merely renamed. If
+    # those platforms get a real, separate export again, re-add them the
+    # same way this one was: from an actual header, not a guess.
+    "crowdstrike": {
         "meta": {"source": "CrowdStrike", "platform": "Windows", "kind": "Workstation"},
         "map": {
-            "bu": "gis_bu", "hostname": "hostname", "install_status": "install_status",
-            "os": "os", "last_seen": "last_seen", "agent_version": "agent_version",
-            "agent_installed": "proc_agent_installed",
-            "cs_reason": "proc_cs_version_status",
-            "compliance": "Compliance", "report_date": "report_date",
+            "bu": "business_unit_code", "hostname": "host_name", "install_status": "install_status",
+            "os": "os", "assigned_to": "assigned_to", "last_seen": "last_seen",
+            "agent_version": "agent_version", "agent_installed": "crowdstrike",
+            "compliance": "compliant", "report_date": "report_date",
         },
-        "columns": ["gis_bu", "hostname", "install_status", "os", "last_seen", "agent_version",
-                    "proc_agent_installed", "proc_cs_version_status", "proc_agent_reporting",
-                    "Compliance", "report_date"],
+        "columns": ["hostname", "business_unit_code", "manufacturer", "chassis_type", "model_id",
+                    "serial_number", "company", "assigned_to", "hardware_status", "install_status",
+                    "os", "os_domain", "u_vlan", "u_dr_availability", "u_dr_grouping",
+                    "u_security_zone", "sys_class_name", "last_discovered", "business_unit",
+                    "virtual", "u_non_discoverable_ci", "crowdstrike_required", "crowdstrike",
+                    "agent_version", "report_date", "crowdstrike_installed", "host_name",
+                    "compliant", "ageing_30_days", "ageing_60_days", "ageing_90_days", "last_seen",
+                    "run_at"],
     },
-    "aiago_mac_cs": {
-        "meta": {"source": "CrowdStrike", "platform": "Mac", "kind": "Workstation"},
-        "map": {
-            "bu": "BU", "hostname": "computer_name", "os": "os_version",
-            "last_seen": "last_seen", "agent_installed": "proc_agent_installed",
-            "cs_reason": "proc_cs_version_status",
-            "compliance": "Compliance", "report_date": "report_date",
-        },
-        "columns": ["BU", "computer_name", "os_version", "proc_agent_installed", "last_seen",
-                    "proc_cs_version_status", "proc_agent_reporting", "Compliance", "report_date"],
-    },
-    "aiago_server_cs": {
-        "meta": {"source": "CrowdStrike", "platform": None, "kind": "Server"},  # platform from ser_os
-        "map": {
-            "bu": "gis_bu", "hostname": "ser_name", "install_status": "ser_install_status",
-            "sys_class": "ser_sys_class_name", "os": "ser_os", "last_seen": "last_seen",
-            "agent_version": "agent_version", "agent_installed": "proc_agent_installed",
-            "cs_reason": "proc_cs_version_status",
-            "compliance": "Compliance", "report_date": "report_date",
-        },
-        "columns": ["gis_bu", "ser_name", "ser_install_status", "ser_sys_class_name", "ser_os",
-                    "last_seen", "agent_version", "proc_agent_installed", "proc_cs_version_status",
-                    "proc_agent_reporting", "Compliance", "report_date"],
-    },
-    "aiago_windows_purview": {
-        "meta": {"source": "Purview", "platform": "Windows", "kind": "Workstation"},
-        "map": {
-            "bu": "gis_bu", "hostname": "name", "install_status": "install_status",
-            "os": "os", "assigned_to": "assigned_to", "last_seen": "purview_last_seen",
-            "mocamp_version": "purview_defender_mocamp_version",
-            "engine_version": "purview_defender_engine_version",
-            "config_status": "purview_configuration_status",
-            "policy_status": "purview_policy_status",
-            "compliance": "compliance", "report_date": "report_date",
-        },
-        "columns": ["gis_bu", "name", "install_status", "os", "assigned_to", "purview_last_seen",
-                    "purview_defender_mocamp_version", "purview_defender_engine_version",
-                    "purview_configuration_status", "purview_policy_status", "compliance",
-                    "report_date"],
-    },
-    "aiago_mac_purview": {
-        "meta": {"source": "Purview", "platform": "Mac", "kind": "Workstation"},
-        "map": {
-            "bu": "gis_bu", "hostname": "intune_computer_name",
-            "last_seen": "purview_last_seen", "last_sync": "purview_last_policy_sync_time",
-            "mocamp_version": "purview_defender_mocamp_version",
-            "engine_version": "purview_defender_engine_version",
-            "config_status": "purview_configuration_status",
-            "policy_status": "purview_policy_status",
-            "compliance": "compliance", "report_date": "report_date",
-        },
-        "columns": ["gis_bu", "intune_computer_name", "purview_configuration_status",
-                    "purview_policy_status", "purview_last_seen", "purview_last_policy_sync_time",
-                    "purview_defender_mocamp_version", "purview_defender_engine_version",
-                    "compliance", "report_date"],
-    },
-    # Fuller CMDB-joined DLP/Purview export (same filename family as Zapp
-    # below). Deliberately positioned AFTER aiago_windows_purview/
-    # aiago_mac_purview: load_all() dedupes rows by (hostname, source),
-    # keeping whichever copy loaded first, so this only ADDS hosts the two
-    # thinner exports above missed entirely (verified: 13 real non-compliant
-    # hosts, e.g. Caroline Choi/Jordy Ngan/Tanya Kan, present here but absent
-    # from those files) rather than double-counting the ~50 hosts both cover.
-    # Same compliance criteria (config/policy status) as the files above -
-    # unlike the sibling 'Crowdstrike' CSV (deliberately NOT added: its own
-    # 'compliant' flag only checks install presence, not version currency,
-    # which disagrees with cs_issue()'s policy on real hosts - see git log).
+    # Fuller CMDB-joined DLP/Purview export (same filename family as
+    # Crowdstrike above and Zapp below). Real file: 1514 rows, EVERY Windows
+    # workstation (both compliant and not) - confirmed comprehensive, not
+    # just a supplement - so this is now the SOLE Purview-sourced compliance
+    # check for workstations. It used to sit alongside separate, thinner
+    # aiago_windows_purview/aiago_mac_purview exports and only ADD the hosts
+    # those missed (deduped by load_all() on (hostname, source), keeping
+    # whichever copy loaded first); those two entries relied on files that no
+    # longer exist under the current (dated-CSV) naming convention and have
+    # been removed, not merely renamed - this one's real comprehensiveness is
+    # exactly why removing them loses no coverage.
     # This export lists EVERY device, not just non-compliant ones, so
     # is_compliant_text() in normalize_file() gates on it before it becomes a finding.
     # key "dlp" (not "aiago_dlp_full") deliberately - find_dataset() matches by
@@ -911,14 +884,15 @@ def load_all() -> list:
     'CompliantReport(Working).xlsx'). Each report is loaded exactly once, by
     whichever form is found first (standalone file takes priority).
 
-    Some reports overlap in host coverage by design (e.g. "dlp" is a
-    fuller re-export of the same check as aiago_windows_purview/mac_purview -
-    see FILE_REGISTRY comment), so rows are deduplicated by (hostname,
-    source), keeping whichever copy was loaded first. FILE_REGISTRY lists the
-    thinner/original exports before their fuller counterparts, so this keeps
-    the original's row for any host both cover and only ADDS hosts unique to
-    the fuller export - never double-counts, never drops a host either side
-    catches alone."""
+    Rows are deduplicated by (hostname, source), keeping whichever copy was
+    loaded first - defense against two registry entries both covering the
+    same report under the same source (this used to matter for real: "dlp"
+    was once a fuller re-export overlapping aiago_windows_purview/
+    aiago_mac_purview - see the "dlp" FILE_REGISTRY comment for why those
+    were removed, not just renamed). No two current entries share a source,
+    so this dedup is dormant today, not exercised - kept as-is since it's
+    free insurance against the same situation recurring, e.g. if a report
+    ever splits back into two overlapping files."""
     all_rows = []
     print(f"Reading reports from '{DATA_DIR}/':")
     for rk in FILE_REGISTRY:
@@ -1547,44 +1521,39 @@ def generate_mock_data() -> None:
     print(f"Generating mock data in '{DATA_DIR}/' ({'xlsx' if HAVE_XLSX else 'csv'}):")
     RD = "2026-06-30"
 
-    _write_mock("AIAGO_Workstation_CS", FILE_REGISTRY["aiago_workstation_cs"]["columns"],
+    # Shapes taken directly from the real file's actual schema/values (see
+    # the "crowdstrike" FILE_REGISTRY comment) - a simple binary compliant/
+    # non-compliant export, no separate "outdated" reason field.
+    _write_mock("Crowdstrike_Deployment", FILE_REGISTRY["crowdstrike"]["columns"],
         [
-            {"gis_bu": "APAC-Retail", "hostname": "WS-APAC-001", "install_status": "Installed", "os": "Windows 11 24H2", "last_seen": "2026-05-20", "agent_version": "7.30.10", "proc_agent_installed": "yes", "proc_cs_version_status": "Outdated", "proc_agent_reporting": "yes", "Compliance": "Non-Compliant", "report_date": RD},
-            {"gis_bu": "APAC-Retail", "hostname": "WS-APAC-002", "install_status": "Installed", "os": "Windows 11 24H2", "last_seen": "", "agent_version": "", "proc_agent_installed": "no", "proc_cs_version_status": "", "proc_agent_reporting": "no", "Compliance": "Non-Compliant", "report_date": RD},
-            {"gis_bu": "EMEA-Ops", "hostname": "WS-EMEA-014", "install_status": "Installed", "os": "Windows 11 24H2", "last_seen": "2026-06-28", "agent_version": "7.35.20709", "proc_agent_installed": "yes", "proc_cs_version_status": "Latest", "proc_agent_reporting": "no", "Compliance": "Non-Compliant", "report_date": RD},
-            # two AD names share the given token "terry" ('Terry' vs 'Terry-SP'),
-            # but the CMDB name carries the full 'Terry-SP' suffix - should
-            # resolve uniquely to the fuller-overlap candidate, not go to review
-            {"gis_bu": "APAC-Retail", "hostname": "WS-APAC-005", "install_status": "Installed", "os": "Windows 11 24H2", "last_seen": "2026-06-15", "agent_version": "7.30.10", "proc_agent_installed": "yes", "proc_cs_version_status": "Outdated", "proc_agent_reporting": "yes", "Compliance": "Non-Compliant", "report_date": RD},
-        ])
-
-    _write_mock("AIAGO_Mac_CS", FILE_REGISTRY["aiago_mac_cs"]["columns"],
-        [
-            {"BU": "APAC-Retail", "computer_name": "MAC-APAC-07", "os_version": "macOS 14.5", "proc_agent_installed": "no", "last_seen": "", "proc_cs_version_status": "Unknown", "proc_agent_reporting": "no", "Compliance": "Non-Compliant", "report_date": RD},
-            {"BU": "AMS-Corp", "computer_name": "MAC-AMS-22", "os_version": "macOS 14.4", "proc_agent_installed": "yes", "last_seen": "2026-06-27", "proc_cs_version_status": "Outdated", "proc_agent_reporting": "yes", "Compliance": "Non-Compliant", "report_date": RD},
-        ])
-
-    _write_mock("AIAGO_Server_CS", FILE_REGISTRY["aiago_server_cs"]["columns"],
-        [
-            # both columns populated -> ser_os wins ("Windows")
-            {"gis_bu": "EMEA-Ops", "ser_name": "SRV-EMEA-DB01", "ser_install_status": "Installed", "ser_sys_class_name": "Server", "ser_os": "Windows Server 2022", "last_seen": "2026-05-30", "agent_version": "7.28.5", "proc_agent_installed": "yes", "proc_cs_version_status": "Outdated", "proc_agent_reporting": "yes", "Compliance": "Non-Compliant", "report_date": RD},
-            # ser_os empty, class carries OS signal -> fallback to class ("Linux")
-            {"gis_bu": "AMS-Corp", "ser_name": "SRV-AMS-APP3", "ser_install_status": "Installed", "ser_sys_class_name": "Linux Server", "ser_os": "", "last_seen": "", "agent_version": "", "proc_agent_installed": "no", "proc_cs_version_status": "Unknown", "proc_agent_reporting": "no", "Compliance": "Non-Compliant", "report_date": RD},
-            # ser_os empty, class not a Win/Mac/Linux word -> keep literal ("Citrix VDI")
-            {"gis_bu": "EMEA-Ops", "ser_name": "SRV-EMEA-VDI9", "ser_install_status": "Installed", "ser_sys_class_name": "Citrix VDI", "ser_os": "", "last_seen": "2026-06-01", "agent_version": "7.29.1", "proc_agent_installed": "yes", "proc_cs_version_status": "Outdated", "proc_agent_reporting": "yes", "Compliance": "Non-Compliant", "report_date": RD},
-        ])
-
-    _write_mock("AIAGO_Windows_Purview", FILE_REGISTRY["aiago_windows_purview"]["columns"],
-        [
-            {"gis_bu": "APAC-Retail", "name": "WS-APAC-001", "install_status": "Installed", "os": "Windows 11 24H2", "assigned_to": "Chan, Tai Man Terry", "purview_last_seen": "2026-06-25", "purview_defender_mocamp_version": "4.18.25000.1", "purview_defender_engine_version": "1.1.25000.1", "purview_configuration_status": "NotUpdated", "purview_policy_status": "NotUpdated", "compliance": "Non-Compliant", "report_date": RD},
-            {"gis_bu": "EMEA-Ops", "name": "WS-EMEA-030", "install_status": "Installed", "os": "Windows 11 24H2", "assigned_to": "carol@example.com", "purview_last_seen": "", "purview_defender_mocamp_version": "4.18.25000.1", "purview_defender_engine_version": "", "purview_configuration_status": "", "purview_policy_status": "", "compliance": "Non-Compliant", "report_date": RD},
-            # comma-less 'Given Surname' - the CMDB 'Assigned to'/'Owner' convention seen in prod
-            {"gis_bu": "APAC-Retail", "name": "WS-APAC-003", "install_status": "Installed", "os": "Windows 11 24H2", "assigned_to": "Siu Ming Wong", "purview_last_seen": "2026-06-20", "purview_defender_mocamp_version": "4.18.25000.1", "purview_defender_engine_version": "1.1.25000.1", "purview_configuration_status": "NotUpdated", "purview_policy_status": "NotUpdated", "compliance": "Non-Compliant", "report_date": RD},
-        ])
-
-    _write_mock("AIAGO_Mac_Purview", FILE_REGISTRY["aiago_mac_purview"]["columns"],
-        [
-            {"gis_bu": "AMS-Corp", "intune_computer_name": "MAC-AMS-22", "purview_configuration_status": "Not Onboarded", "purview_policy_status": "Not Applied", "purview_last_seen": "2026-06-18", "purview_last_policy_sync_time": "2026-06-10", "purview_defender_mocamp_version": "", "purview_defender_engine_version": "", "compliance": "Non-Compliant", "report_date": RD},
+            {"business_unit_code": "APAC-Retail", "host_name": "WS-APAC-001", "install_status": "Installed",
+             "os": "Windows 11 Enterprise", "assigned_to": "Chan, Tai Man Terry",
+             "crowdstrike": "No", "crowdstrike_installed": "0", "compliant": "0",
+             "agent_version": "", "last_seen": "", "report_date": RD},
+            # assigned_to blank -> falls back to CMDB hostname->name lookup
+            {"business_unit_code": "APAC-Retail", "host_name": "WS-APAC-002", "install_status": "Installed",
+             "os": "Windows 11 Enterprise", "assigned_to": "",
+             "crowdstrike": "No", "crowdstrike_installed": "0", "compliant": "0",
+             "agent_version": "", "last_seen": "", "report_date": RD},
+            # assigned_to blank; CMDB's name for this host (Kelvin Lam) is
+            # given-name-first with no comma - only resolves correctly via
+            # AD's Surname/GivenName columns, not by parsing DisplayName
+            {"business_unit_code": "EMEA-Ops", "host_name": "WS-EMEA-014", "install_status": "Installed",
+             "os": "Windows 11 Enterprise", "assigned_to": "",
+             "crowdstrike": "No", "crowdstrike_installed": "0", "compliant": "0",
+             "agent_version": "7.36.20805.0", "last_seen": "2026-06-28", "report_date": RD},
+            # assigned_to blank; CMDB carries the full 'Terry-SP' suffix - two
+            # AD names share the given token "terry" ('Terry' vs 'Terry-SP'),
+            # must resolve uniquely to the fuller-overlap candidate, not review
+            {"business_unit_code": "APAC-Retail", "host_name": "WS-APAC-005", "install_status": "Installed",
+             "os": "Windows 11 Enterprise", "assigned_to": "",
+             "crowdstrike": "No", "crowdstrike_installed": "0", "compliant": "0",
+             "agent_version": "", "last_seen": "2026-06-15", "report_date": RD},
+            # compliant device in this UNFILTERED export -> must be skipped
+            {"business_unit_code": "APAC-Retail", "host_name": "WS-APAC-011", "install_status": "Installed",
+             "os": "Windows 11 Enterprise", "assigned_to": "Wong, Siu Ming",
+             "crowdstrike": "Yes", "crowdstrike_installed": "1", "compliant": "1",
+             "agent_version": "7.36.20805.0", "last_seen": "2026-06-29", "report_date": RD},
         ])
 
     _write_mock("Zapp_Deployment", FILE_REGISTRY["zapp"]["columns"],
@@ -1603,14 +1572,19 @@ def generate_mock_data() -> None:
 
     _write_mock("DLP_Deployment", FILE_REGISTRY["dlp"]["columns"],
         [
-            # same host+finding as AIAGO_Windows_Purview's WS-APAC-001 above -
-            # load_all()'s dedup must drop this copy, not double-email Terry
+            # same host as the Crowdstrike mock's WS-APAC-001 above, but a
+            # DIFFERENT source (Purview, not CrowdStrike) - must consolidate
+            # into ONE email for Terry (one message per person, not one per
+            # source), not be deduped away (dedup is keyed on (hostname,
+            # source), so these two rows are never considered duplicates).
             {"name": "WS-APAC-001", "business_unit_code": "APAC-Retail", "assigned_to": "Chan, Tai Man Terry",
              "install_status": "Installed", "os": "Windows 11 24H2", "sys_class_name": "Computer",
              "purview_configuration_status": "NotUpdated", "purview_policy_status": "NotUpdated",
              "purview_last_seen": "2026-06-25", "compliance": "Non-compliant", "report_date": RD},
-            # host this fuller export catches that the thinner Purview exports
-            # above never listed at all - must be ADDED, not dropped
+            # a host with a Purview finding but no CrowdStrike one - DLP is
+            # now the sole Purview-sourced entry, so there's nothing for it
+            # to be "added on top of"; this just pins that a host appearing
+            # in only one source still becomes a finding
             {"name": "WS-APAC-006", "business_unit_code": "APAC-Retail", "assigned_to": "Wong, Siu Ming",
              "install_status": "Installed", "os": "Windows 11 24H2", "sys_class_name": "Computer",
              "purview_configuration_status": "", "purview_policy_status": "",

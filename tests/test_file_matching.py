@@ -40,25 +40,38 @@ def test_bitlocker_registry_key_matches_real_filename(data_dir):
     assert sheet is None
 
 
+def test_crowdstrike_registry_key_matches_real_filename(data_dir):
+    """The real CrowdStrike export is named '20260715_AIAGO-17. Workstation
+    Security Agent Deployment-Crowdstrike.csv' - it never contains
+    'aiago_workstation_cs' (the old registry key) anywhere, which is why
+    that key was retired in favor of 'crowdstrike' - a literal substring of
+    the real name, same reasoning as 'encryption' above."""
+    (data_dir / "20260715_AIAGO-17. Workstation Security Agent Deployment-Crowdstrike.csv").write_text("h1,h2\n")
+    path, sheet = cnc.find_dataset("crowdstrike")
+    assert path is not None, "REGRESSION: registry key no longer matches the real filename"
+    assert "Crowdstrike" in path
+    assert sheet is None
+
+
 def test_matches_by_filename_substring(data_dir):
-    _write_blank_xlsx(data_dir / "AIAGO_Workstation_CS.xlsx")
-    path, sheet = cnc.find_dataset("aiago_workstation_cs")
-    assert path.endswith("AIAGO_Workstation_CS.xlsx")
+    _write_blank_xlsx(data_dir / "Crowdstrike_Deployment.xlsx")
+    path, sheet = cnc.find_dataset("crowdstrike")
+    assert path.endswith("Crowdstrike_Deployment.xlsx")
     assert sheet is None
 
 
 def test_returns_none_when_nothing_matches(data_dir):
     _write_blank_xlsx(data_dir / "Totally_Unrelated_File.xlsx")
-    assert cnc.find_dataset("aiago_workstation_cs") is None
+    assert cnc.find_dataset("crowdstrike") is None
 
 
 def test_renaming_a_known_file_makes_it_invisible(data_dir):
-    """A real risk: renaming AIAGO_Workstation_CS.xlsx to something that no
-    longer contains 'aiago_workstation_cs' as a substring makes the whole
-    report vanish from the pipeline with no error - just a console
-    '! not found' line in load_all(). This test documents that behavior."""
-    _write_blank_xlsx(data_dir / "AIAGO_Workstation_CrowdStrike_Report.xlsx")
-    assert cnc.find_dataset("aiago_workstation_cs") is None
+    """A real risk: renaming Crowdstrike_Deployment.xlsx to something that no
+    longer contains 'crowdstrike' as a substring makes the whole report
+    vanish from the pipeline with no error - just a console '! not found'
+    line in load_all(). This test documents that behavior."""
+    _write_blank_xlsx(data_dir / "Workstation_Security_Agent_Report.xlsx")
+    assert cnc.find_dataset("crowdstrike") is None
 
 
 def test_false_positive_on_coincidental_filename_substring(data_dir):
