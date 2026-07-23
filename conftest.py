@@ -11,6 +11,20 @@ import pytest
 import consolidate_noncompliant as cnc
 
 
+@pytest.fixture(autouse=True)
+def _clear_xlsx_workbook_cache():
+    """Every test starts and ends with an empty xlsx workbook cache (see
+    consolidate_noncompliant._get_cached_workbook()/_clear_xlsx_cache()) -
+    without this, a workbook cached by one test could leak an open file
+    handle past that test's tmp_path teardown (Windows can't delete a
+    directory with an open handle into it), or - if two tests ever reused
+    the exact same DATA_DIR+filename pair - serve one test's content to
+    another."""
+    cnc._clear_xlsx_cache()
+    yield
+    cnc._clear_xlsx_cache()
+
+
 @pytest.fixture
 def data_dir(tmp_path, monkeypatch):
     """Redirects consolidate_noncompliant.DATA_DIR at a scratch directory for

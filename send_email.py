@@ -437,6 +437,7 @@ def build_groups() -> tuple:
     minus the mock-data-generation step (which callers opt into explicitly,
     e.g. the self-test) and minus writing the worklist - this module only
     needs recipient groups, not the full worklist workbook."""
+    cnc._clear_xlsx_cache()  # a fresh run must never reuse a workbook cached by an earlier one
     rows = cnc.load_all()
     cmdb_names = cnc.read_cmdb_mapping()
     ad = cnc.read_ad_users()

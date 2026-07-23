@@ -696,19 +696,61 @@ def _reraise_with_filename(name: str, exc: Exception) -> None:
     raise type(exc)(f"{name}: {exc}") from exc
 
 
+_xlsx_workbook_cache = {}
+
+
+def _clear_xlsx_cache() -> None:
+    """Closes and drops every cached xlsx workbook (see
+    _get_cached_workbook()). Must be called at the start of every top-level
+    pipeline entry point (consolidate_noncompliant.main(), send_email.py's
+    build_groups()) - a long-lived process that imports this module once and
+    calls one of those repeatedly (e.g. a Databricks notebook cell re-run
+    after a file changed) must never serve a workbook cached from an earlier
+    call. Also called by tests (see conftest.py's autouse fixture) so no
+    workbook - or its open file handle - survives past the test that opened
+    it."""
+    for wb in _xlsx_workbook_cache.values():
+        try:
+            wb.close()
+        except Exception:
+            pass
+    _xlsx_workbook_cache.clear()
+
+
+def _get_cached_workbook(name: str):
+    """-> the openpyxl Workbook for `name`, opened at most ONCE per pipeline
+    run regardless of how many callers need it. _list_sheets() and
+    _open_xlsx_headers() both go through this instead of calling
+    openpyxl.load_workbook() directly, so a large multi-tab workbook read by
+    several different lookups in one run (e.g. CompliantReport(Working).xlsx:
+    once for the pre-flight check, once each for CMDB/AD_Users/Overrides) is
+    only actually parsed from disk once - see _clear_xlsx_cache() for the
+    per-run reset. Keyed by (DATA_DIR, name), not just `name`, so tests that
+    point DATA_DIR at different temp directories never collide on a shared
+    filename. A failed open is never cached - a bad file still fails the
+    same way on every attempt, not just the first."""
+    key = (DATA_DIR, name)
+    if key not in _xlsx_workbook_cache:
+        data = _get_data_source().read_file(name)
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        except Exception as e:
+            _reraise_with_filename(name, e)
+        _xlsx_workbook_cache[key] = wb
+    return _xlsx_workbook_cache[key]
+
+
 def _open_xlsx_headers(name: str, sheet: str, expected_headers: list):
-    """Opens the workbook, selects the sheet, and reads+heals just the
-    header row. -> (workbook, row_iterator, headers). Caller must close
-    `workbook`. `row_iterator` continues from the row AFTER headers, for a
-    caller that wants the data rows too (_read_xlsx_rows) - a caller that
-    only wants headers (_read_headers) can close and return right away
-    without ever touching `row_iterator`, so pulling this logic out into a
-    shared helper does NOT cost reading the rest of the sheet."""
-    data = _get_data_source().read_file(name)
-    try:
-        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-    except Exception as e:
-        _reraise_with_filename(name, e)
+    """Selects the sheet in the (cached - see _get_cached_workbook())
+    workbook, and reads+heals just the header row. -> (workbook,
+    row_iterator, headers). The workbook is shared/cached, so callers must
+    NOT close it - see _clear_xlsx_cache() for the actual close point.
+    `row_iterator` continues from the row AFTER headers, for a caller that
+    wants the data rows too (_read_xlsx_rows) - a caller that only wants
+    headers (_read_headers) can return right away without ever touching
+    `row_iterator`, so pulling this logic out into a shared helper does NOT
+    cost reading the rest of the sheet."""
+    wb = _get_cached_workbook(name)
     ws = wb[sheet] if sheet else wb.active
     it = ws.iter_rows(values_only=True)
     try:
@@ -721,16 +763,14 @@ def _open_xlsx_headers(name: str, sheet: str, expected_headers: list):
 
 def _read_xlsx_rows(name: str, sheet: str = None, expected_headers: list = None) -> list:
     _require_openpyxl(name)
-    wb, it, headers = _open_xlsx_headers(name, sheet, expected_headers)
+    _, it, headers = _open_xlsx_headers(name, sheet, expected_headers)
     if not headers:
-        wb.close()
         return []
     out = []
     for row in it:
         if row is None or all(c is None for c in row):
             continue
         out.append({h: (row[i] if i < len(row) else None) for i, h in enumerate(headers)})
-    wb.close()
     return out
 
 
@@ -745,8 +785,7 @@ def _read_headers(name: str, sheet: str = None, expected_headers: list = None) -
     does not read the rest of the sheet - see _open_xlsx_headers()."""
     if name.lower().endswith(".xlsx"):
         _require_openpyxl(name)
-        wb, it, headers = _open_xlsx_headers(name, sheet, expected_headers)
-        wb.close()
+        _, _, headers = _open_xlsx_headers(name, sheet, expected_headers)
         return headers
     raw = _get_data_source().read_file(name)
     try:
@@ -1064,14 +1103,7 @@ def _list_sheets(name: str) -> list:
     if not name.lower().endswith(".xlsx"):
         return [None]
     _require_openpyxl(name)
-    data = _get_data_source().read_file(name)
-    try:
-        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True)
-    except Exception as e:
-        _reraise_with_filename(name, e)
-    names = wb.sheetnames
-    wb.close()
-    return names
+    return _get_cached_workbook(name).sheetnames
 
 
 # ===========================================================================
@@ -1871,6 +1903,7 @@ def _data_dir_has_files() -> bool:
 
 
 def main() -> None:
+    _clear_xlsx_cache()  # a fresh run must never reuse a workbook cached by an earlier one
     print(f"[i/o mode: {'XLSX' if HAVE_XLSX else 'CSV'}]\n")
     if "--regen" in sys.argv or not _data_dir_has_files():
         generate_mock_data()
