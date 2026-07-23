@@ -53,6 +53,45 @@ def test_crowdstrike_registry_key_matches_real_filename(data_dir):
     assert sheet is None
 
 
+# ===========================================================================
+# Windows/Mac key separation - the Mac exports (ticket AIAGO-18) share the
+# same "Workstation Security Agent Deployment" wording and the same bare
+# "dlp"/"zapp" substrings as their Windows (AIAGO-17) counterparts, but are a
+# completely different, incompatible schema. "deployment-dlp"/"deployment-
+# zapp" (Windows) and "(mac)-dlp"/"(mac)-zapp"/"(mac)-cs" (Mac) must each
+# match ONLY their own real file, never each other's - a false cross-match
+# would silently feed one schema's file through the other's column map.
+# ===========================================================================
+
+def test_mac_and_windows_registry_keys_match_real_filenames_exclusively(data_dir):
+    win_cs = "20260715_AIAGO-17. Workstation Security Agent Deployment-Crowdstrike.csv"
+    win_dlp = "20260715_AIAGO-17. Workstation Security Agent Deployment-DLP.csv"
+    win_zapp = "20260715_AIAGO-17. Workstation Security Agent Deployment-Zapp.csv"
+    mac_cs = "20260722_AIAGO-18. Workstation Security Agent Deployment (MAC)-CS.csv"
+    mac_dlp = "20260722_AIAGO-18. Workstation Security Agent Deployment (MAC)-DLP.csv"
+    mac_zapp = "20260722_AIAGO-18. Workstation Security Agent Deployment (MAC)-Zapp.csv"
+    for name in (win_cs, win_dlp, win_zapp, mac_cs, mac_dlp, mac_zapp):
+        (data_dir / name).write_text("h1,h2\n")
+
+    path, _ = cnc.find_dataset("crowdstrike")
+    assert path == win_cs, f"REGRESSION: 'crowdstrike' matched {path!r}, expected the Windows file"
+
+    path, _ = cnc.find_dataset("(mac)-cs")
+    assert path == mac_cs, f"REGRESSION: '(mac)-cs' matched {path!r}, expected the Mac file"
+
+    path, _ = cnc.find_dataset("deployment-dlp")
+    assert path == win_dlp, f"REGRESSION: 'deployment-dlp' matched {path!r}, expected the Windows file"
+
+    path, _ = cnc.find_dataset("(mac)-dlp")
+    assert path == mac_dlp, f"REGRESSION: '(mac)-dlp' matched {path!r}, expected the Mac file"
+
+    path, _ = cnc.find_dataset("deployment-zapp")
+    assert path == win_zapp, f"REGRESSION: 'deployment-zapp' matched {path!r}, expected the Windows file"
+
+    path, _ = cnc.find_dataset("(mac)-zapp")
+    assert path == mac_zapp, f"REGRESSION: '(mac)-zapp' matched {path!r}, expected the Mac file"
+
+
 def test_matches_by_filename_substring(data_dir):
     _write_blank_xlsx(data_dir / "Crowdstrike_Deployment.xlsx")
     path, sheet = cnc.find_dataset("crowdstrike")

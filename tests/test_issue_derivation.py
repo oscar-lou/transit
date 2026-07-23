@@ -31,6 +31,18 @@ def test_cs_issue_unknown_reason():
     assert issue == "CrowdStrike agent not installed"
 
 
+@pytest.mark.parametrize("agent_installed", ["0", "false", "False"])
+def test_cs_issue_accepts_zero_and_false_as_not_installed(agent_installed):
+    """The real Mac CrowdStrike export ("(mac)-cs" in FILE_REGISTRY) has no
+    Yes/No install column - only a "0"/"1" compliant_status flag mapped
+    straight into agent_installed. Must classify the same as "No", not fall
+    through to a different branch just because the literal string differs."""
+    issue, action = cnc.cs_issue("", agent_installed)
+    assert issue == "CrowdStrike agent not installed", (
+        f"REGRESSION: agent_installed={agent_installed!r} must still mean "
+        f"not installed, got issue={issue!r}")
+
+
 def test_cs_issue_outdated():
     issue, action = cnc.cs_issue("Outdated", "Yes")
     assert issue == "CrowdStrike agent outdated"

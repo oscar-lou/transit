@@ -84,12 +84,48 @@ def test_full_pipeline_against_mock_fixtures(data_and_output_dir):
 
     # CrowdStrike's non-compliant rows all share the same real shape (agent
     # not installed - the only one observed in the real data) and must
-    # classify accordingly.
+    # classify accordingly. This spans BOTH the Windows and Mac CrowdStrike
+    # sources - same "source" value, different real schemas/registry keys.
     crowdstrike_rows = [r for r in rows if r["source"] == "CrowdStrike"]
     assert crowdstrike_rows, "test fixture sanity check - need at least one CrowdStrike finding"
     assert all(r["issue"] == "CrowdStrike agent not installed" for r in crowdstrike_rows), (
         f"REGRESSION: unexpected CrowdStrike issue text(s): "
         f"{ {r['issue'] for r in crowdstrike_rows} }")
+
+    # Mac CrowdStrike/Zapp/DLP's compliant mock rows must each be gated out
+    # too - all three Mac sources are unfiltered exports, same as their
+    # Windows counterparts.
+    assert not any(r["hostname"] == "MAC-APAC-08" for r in rows), (
+        "REGRESSION: Mac CrowdStrike's compliant row was not gated out")
+    assert not any(r["hostname"] == "MAC-APAC-09" for r in rows), (
+        "REGRESSION: Mac Zapp's compliant row was not gated out")
+    assert not any(r["hostname"] == "MAC-APAC-10" for r in rows), (
+        "REGRESSION: Mac DLP's compliant row was not gated out")
+
+    # Mac Zapp's non-compliant row (compliant_status='0', mapped straight
+    # into zapp_installed) must classify the same as the Windows convention.
+    assert any(r["hostname"] == "MAC-AMS-25" and r["issue"] == "Zapp (Zscaler Client Connector) not installed"
+               for r in rows), "REGRESSION: Mac Zapp's compliant_status='0' row misclassified"
+
+    # MAC-APAC-07 ([External]-tagged CMDB name) has no assigned_to column at
+    # all in the real Mac CrowdStrike schema - must resolve entirely via CMDB
+    # fallback, through the FULL pipeline (not just resolve_name_to_email()
+    # in isolation - see test_name_resolution.py for that).
+    assert "john.lee@consultant.com" in groups, (
+        "REGRESSION: MAC-APAC-07's CMDB/AD resolution (with [External] tag "
+        "stripped) did not survive the full pipeline")
+
+    # MAC-AMS-22 ("Smith, Robert") is genuinely ambiguous in AD (ties between
+    # two real people) and has findings from TWO Mac sources (CrowdStrike and
+    # DLP) - both must land in review, never in groups. The narrower,
+    # mock-independent version of this same invariant is pinned directly
+    # against build_notifications() in test_ambiguous_name_lands_in_review_
+    # and_never_in_groups below.
+    assert not any(r["hostname"] == "MAC-AMS-22" for g in groups.values() for r in g["rows"]), (
+        "REGRESSION: ambiguous MAC-AMS-22 reached the confidently-resolved send set")
+    review_hosts_and_sources = {(r["hostname"], r["source"]) for r, how, cands in review}
+    assert ("MAC-AMS-22", "CrowdStrike") in review_hosts_and_sources
+    assert ("MAC-AMS-22", "Purview") in review_hosts_and_sources
 
 
 def test_build_notifications_skips_server_rows_directly():

@@ -168,13 +168,14 @@ FILE_REGISTRY = {
     # (7.35.20709), meaning CS_LATEST itself is stale - comparing against it
     # directly would falsely flag those 468 as outdated instead.
     #
-    # There is no separate Mac-CrowdStrike or Server-CrowdStrike export under
-    # the current (dated-CSV) naming convention - the old aiago_mac_cs/
-    # aiago_server_cs entries (and aiago_windows_purview/aiago_mac_purview,
-    # see the "dlp" entry below) relied on differently-named/schemaed files
-    # that no longer exist and have been removed, not merely renamed. If
-    # those platforms get a real, separate export again, re-add them the
-    # same way this one was: from an actual header, not a guess.
+    # There is no separate Server-CrowdStrike export under the current
+    # (dated-CSV) naming convention - the old aiago_server_cs entry (and
+    # aiago_windows_purview/aiago_mac_purview, see the "deployment-dlp" entry
+    # below) relied on differently-named/schemaed files that no longer exist
+    # and have been removed, not merely renamed. Mac DOES have a separate,
+    # real export - see "(mac)-cs" below - it just lives under a different
+    # ticket (AIAGO-18, not AIAGO-17) with a different schema entirely, so it
+    # gets its own registry entry rather than sharing this one.
     "crowdstrike": {
         "meta": {"source": "CrowdStrike", "platform": "Windows", "kind": "Workstation"},
         "map": {
@@ -192,11 +193,34 @@ FILE_REGISTRY = {
                     "compliant", "ageing_30_days", "ageing_60_days", "ageing_90_days", "last_seen",
                     "run_at"],
     },
+    # Real file: '...Workstation Security Agent Deployment (MAC)-CS.csv'
+    # (ticket AIAGO-18, not AIAGO-17 - a separate ticket/export family from
+    # the Windows one above). Different schema entirely: no 'crowdstrike'
+    # Yes/No column, just a single 'compliant_status' (0/1) flag and no
+    # separate hostname duplicate column. No install_status/assigned_to
+    # columns either - recipient resolution for this source relies entirely
+    # on CMDB hostname->name fallback. cs_issue()'s install-check was
+    # widened to also accept "0" (not just "no") specifically to cover this
+    # convention - see cs_issue(). Real snapshot: 3/44 non-compliant, all
+    # correctly classified as "agent not installed" under that check.
+    "(mac)-cs": {
+        "meta": {"source": "CrowdStrike", "platform": "Mac", "kind": "Workstation"},
+        "map": {
+            "bu": "business_unit_code", "hostname": "hostname", "os": "operating_system",
+            "last_seen": "cs_last_seen", "agent_version": "cs_agent_version",
+            "agent_installed": "compliant_status",
+            "compliance": "compliant_status", "report_date": "report_date",
+        },
+        "columns": ["hostname", "business_unit_code", "agent_type", "compliant_status",
+                    "operating_system", "ageing_status", "cs_agent_version", "cs_last_seen",
+                    "cs_last_login_user", "serial_number", "model", "operating_system_version",
+                    "report_date"],
+    },
     # Fuller CMDB-joined DLP/Purview export (same filename family as
     # Crowdstrike above and Zapp below). Real file: 1514 rows, EVERY Windows
     # workstation (both compliant and not) - confirmed comprehensive, not
-    # just a supplement - so this is now the SOLE Purview-sourced compliance
-    # check for workstations. It used to sit alongside separate, thinner
+    # just a supplement - so this is now the SOLE Windows Purview-sourced
+    # compliance check. It used to sit alongside separate, thinner
     # aiago_windows_purview/aiago_mac_purview exports and only ADD the hosts
     # those missed (deduped by load_all() on (hostname, source), keeping
     # whichever copy loaded first); those two entries relied on files that no
@@ -205,10 +229,16 @@ FILE_REGISTRY = {
     # exactly why removing them loses no coverage.
     # This export lists EVERY device, not just non-compliant ones, so
     # is_compliant_text() in normalize_file() gates on it before it becomes a finding.
-    # key "dlp" (not "aiago_dlp_full") deliberately - find_dataset() matches by
-    # substring against the real filename, e.g. "...Deployment-DLP.csv", which
-    # doesn't contain "aiago_dlp_full" (see how "zapp" below is handled too).
-    "dlp": {
+    #
+    # key "deployment-dlp" (not bare "dlp"): a separate, real Mac DLP/Purview
+    # export exists too (see "(mac)-dlp" below), under the SAME ticket family
+    # ('...Workstation Security Agent Deployment (MAC)-DLP.csv') - bare "dlp"
+    # would match both real files (confirmed: 'dlp' is a substring of both),
+    # and picking the wrong one silently would read a completely incompatible
+    # schema. "deployment-dlp" is a substring of the Windows filename
+    # ('...Deployment-DLP.csv') but NOT the Mac one ('...Deployment (MAC)-
+    # DLP.csv' - the ' (MAC)' in between breaks the contiguous match).
+    "deployment-dlp": {
         "meta": {"source": "Purview", "platform": None, "kind": "Workstation"},
         "map": {
             "bu": "business_unit_code", "hostname": "name", "install_status": "install_status",
@@ -232,10 +262,43 @@ FILE_REGISTRY = {
                     "purview_has_dlp_ac_bandwidth_exceeded", "purview_first_time_onboarded",
                     "purview_required", "compliance", "business_unit_code", "ageing_status"],
     },
+    # Real file: '...Workstation Security Agent Deployment (MAC)-DLP.csv'
+    # (ticket AIAGO-18, same family as "(mac)-cs"/"(mac)-zapp" below).
+    # Simpler schema than the Windows DLP export above (no sys_class_name/
+    # assigned_to columns at all - hostname is 'intune_computer_name', and
+    # recipient resolution for this source relies entirely on CMDB fallback,
+    # same as "(mac)-cs" below). Real snapshot: 42/42 rows Compliant (0
+    # non-compliant) - genuinely fully compliant today, not a sign of a
+    # matching problem; purview_issue() is reused as-is since the columns
+    # are the same shape already proven for Windows DLP.
+    "(mac)-dlp": {
+        "meta": {"source": "Purview", "platform": "Mac", "kind": "Workstation"},
+        "map": {
+            "bu": "business_unit_code", "hostname": "intune_computer_name",
+            "last_seen": "purview_last_seen",
+            "mocamp_version": "purview_defender_mocamp_version",
+            "engine_version": "purview_defender_engine_version",
+            "config_status": "purview_configuration_status",
+            "policy_status": "purview_policy_status",
+            "compliance": "compliance", "report_date": "report_date",
+        },
+        "columns": ["intune_computer_name", "intune_orig_bu", "business_unit_code",
+                    "intune_file_update", "report_date", "purview_device_name",
+                    "purview_configuration_status", "purview_policy_status", "purview_valid_user",
+                    "purview_last_seen", "purview_os", "purview_os_version",
+                    "purview_last_ip_address", "perview_device_id", "purview_last_policy_sync_time",
+                    "purview_is_dlp_enabled", "purview_defender_engine_version",
+                    "purview_defender_mocamp_version", "purview_has_dlp_ac_bandwidth_exceeded",
+                    "purview_first_time_onboarded", "purview_required", "compliance",
+                    "ageing_status"],
+    },
     # Zscaler App (client connector) deployment - NOT covered by any of the
     # other reports. This export lists EVERY device (compliant and not)
     # rather than being pre-filtered, so is_compliant_text() gates it too.
-    "zapp": {
+    # key "deployment-zapp" (not bare "zapp"): same reasoning as
+    # "deployment-dlp" above - a real Mac Zapp export exists too (see
+    # "(mac)-zapp" below) and bare "zapp" would match both real filenames.
+    "deployment-zapp": {
         "meta": {"source": "Zapp", "platform": None, "kind": "Workstation"},
         "map": {
             "bu": "business_unit_code", "hostname": "hostname", "install_status": "install_status",
@@ -253,6 +316,27 @@ FILE_REGISTRY = {
                     "policy_name", "device_state", "last_seen_with_client_connector_active",
                     "zapp_installed", "zapp_missing", "host_name", "compliant", "ageing_30_days",
                     "ageing_60_days", "ageing_90_days", "run_at"],
+    },
+    # Real file: '...Workstation Security Agent Deployment (MAC)-Zapp.csv'
+    # (ticket AIAGO-18). Simpler schema than the Windows Zapp export above -
+    # no dedicated zapp_installed/zapp_missing columns, just a single
+    # 'compliant_status' (0/1) flag; mapping it directly to zapp_installed
+    # works unchanged in zapp_issue(), since "0" is already one of the
+    # values that function's install-check accepts (see zapp_issue()).
+    # Real snapshot: all 6 non-compliant rows have zero telemetry (blank
+    # zapp_version/user/last_seen) - the clean "not installed" shape.
+    "(mac)-zapp": {
+        "meta": {"source": "Zapp", "platform": "Mac", "kind": "Workstation"},
+        "map": {
+            "bu": "business_unit_code", "hostname": "hostname", "os": "operating_system",
+            "last_seen": "last_seen_connected_to_zia", "zapp_version": "zapp_version",
+            "zapp_installed": "compliant_status",
+            "compliance": "compliant_status", "report_date": "report_date",
+        },
+        "columns": ["hostname", "business_unit_code", "agent_type", "compliant_status",
+                    "operating_system", "ageing_status", "zapp_version", "zapp_user",
+                    "last_seen_connected_to_zia", "serial_number", "model",
+                    "operating_system_version", "report_date"],
     },
     # BitLocker (Windows disk encryption) compliance export - NOT covered by
     # any of the other reports. Every row here is a Windows notebook (os,
@@ -684,7 +768,11 @@ def cs_issue(reason: str, agent_installed: str = "") -> tuple:
     r = (reason or "").strip().lower()
     # 'agent not installed' is the authoritative signal: some files (Workstation)
     # leave the reason blank for agent-less hosts instead of writing "Unknown".
-    if inst == "no" or r == "unknown":
+    # Accepts "0"/"false" too, not just "no": the Mac CrowdStrike export
+    # ("(mac)-cs" in FILE_REGISTRY) has no Yes/No install column at all, only
+    # a "0"/"1" compliant_status flag mapped straight into agent_installed -
+    # same convention zapp_issue() already accepts for the same reason.
+    if inst in ("no", "0", "false") or r == "unknown":
         return ("CrowdStrike agent not installed",
                 "Install the CrowdStrike sensor (latest from the Prod share)")
     if r == "outdated":
@@ -1556,7 +1644,29 @@ def generate_mock_data() -> None:
              "agent_version": "7.36.20805.0", "last_seen": "2026-06-29", "report_date": RD},
         ])
 
-    _write_mock("Zapp_Deployment", FILE_REGISTRY["zapp"]["columns"],
+    # Real Mac CrowdStrike export shape (see "(mac)-cs" FILE_REGISTRY entry) -
+    # no assigned_to column at all, so recipient resolution relies entirely
+    # on CMDB fallback. Revives MAC-APAC-07/MAC-AMS-22 as real findings again
+    # (CMDB/AD_Users mock rows below already model these two: an [External]-
+    # tagged name and an ambiguous "Smith, Robert" match) - both existed only
+    # as inert fixture data after the old aiago_mac_cs entry (which used to
+    # source them) was removed for relying on a file that no longer exists.
+    _write_mock("Workstation_Deployment (MAC)-CS", FILE_REGISTRY["(mac)-cs"]["columns"],
+        [
+            {"hostname": "MAC-APAC-07", "business_unit_code": "APAC-Retail",
+             "operating_system": "MAC", "compliant_status": "0",
+             "cs_agent_version": "", "cs_last_seen": "", "report_date": RD},
+            # ambiguous name (Smith, Robert) -> must land in review, not groups
+            {"hostname": "MAC-AMS-22", "business_unit_code": "AMS-Corp",
+             "operating_system": "MAC", "compliant_status": "0",
+             "cs_agent_version": "", "cs_last_seen": "", "report_date": RD},
+            # compliant device in this UNFILTERED export -> must be skipped
+            {"hostname": "MAC-APAC-08", "business_unit_code": "APAC-Retail",
+             "operating_system": "MAC", "compliant_status": "1",
+             "cs_agent_version": "7.36.20807.0", "cs_last_seen": "2026-06-29", "report_date": RD},
+        ])
+
+    _write_mock("Workstation_Deployment-Zapp", FILE_REGISTRY["deployment-zapp"]["columns"],
         [
             # not compliant, client missing entirely -> a finding
             {"hostname": "WS-APAC-001", "business_unit_code": "APAC-Retail", "zapp": "FALSE",
@@ -1570,7 +1680,20 @@ def generate_mock_data() -> None:
              "compliant": "1", "report_date": RD},
         ])
 
-    _write_mock("DLP_Deployment", FILE_REGISTRY["dlp"]["columns"],
+    # Real Mac Zapp export shape (see "(mac)-zapp" FILE_REGISTRY entry) - also
+    # no assigned_to column, so this host needs its own CMDB entry (below).
+    _write_mock("Workstation_Deployment (MAC)-Zapp", FILE_REGISTRY["(mac)-zapp"]["columns"],
+        [
+            {"hostname": "MAC-AMS-25", "business_unit_code": "AMS-Corp",
+             "operating_system": "MAC", "compliant_status": "0",
+             "zapp_version": "", "last_seen_connected_to_zia": "", "report_date": RD},
+            # compliant device in this UNFILTERED export -> must be skipped
+            {"hostname": "MAC-APAC-09", "business_unit_code": "APAC-Retail",
+             "operating_system": "MAC", "compliant_status": "1",
+             "zapp_version": "4.5.2.105", "last_seen_connected_to_zia": "2026-06-29", "report_date": RD},
+        ])
+
+    _write_mock("Workstation_Deployment-DLP", FILE_REGISTRY["deployment-dlp"]["columns"],
         [
             # same host as the Crowdstrike mock's WS-APAC-001 above, but a
             # DIFFERENT source (Purview, not CrowdStrike) - must consolidate
@@ -1582,9 +1705,9 @@ def generate_mock_data() -> None:
              "purview_configuration_status": "NotUpdated", "purview_policy_status": "NotUpdated",
              "purview_last_seen": "2026-06-25", "compliance": "Non-compliant", "report_date": RD},
             # a host with a Purview finding but no CrowdStrike one - DLP is
-            # now the sole Purview-sourced entry, so there's nothing for it
-            # to be "added on top of"; this just pins that a host appearing
-            # in only one source still becomes a finding
+            # now the sole Windows Purview-sourced entry, so there's nothing
+            # for it to be "added on top of"; this just pins that a host
+            # appearing in only one source still becomes a finding
             {"name": "WS-APAC-006", "business_unit_code": "APAC-Retail", "assigned_to": "Wong, Siu Ming",
              "install_status": "Installed", "os": "Windows 11 24H2", "sys_class_name": "Computer",
              "purview_configuration_status": "", "purview_policy_status": "",
@@ -1592,6 +1715,22 @@ def generate_mock_data() -> None:
             # compliant device in this UNFILTERED export -> must be skipped
             {"name": "WS-APAC-007", "business_unit_code": "APAC-Retail", "assigned_to": "carol@example.com",
              "install_status": "Installed", "os": "Windows 11 24H2", "sys_class_name": "Computer",
+             "purview_configuration_status": "Updated", "purview_policy_status": "Updated",
+             "purview_last_seen": "2026-06-29", "compliance": "Compliant", "report_date": RD},
+        ])
+
+    # Real Mac DLP/Purview export shape (see "(mac)-dlp" FILE_REGISTRY entry).
+    # MAC-AMS-22 reused here too - a second (third, counting Zapp... no,
+    # CS+DLP) finding for the same ambiguous "Smith, Robert" host, same
+    # pattern as WS-APAC-001's multi-source consolidation above.
+    _write_mock("Workstation_Deployment (MAC)-DLP", FILE_REGISTRY["(mac)-dlp"]["columns"],
+        [
+            {"intune_computer_name": "MAC-AMS-22", "business_unit_code": "AMS-Corp",
+             "purview_configuration_status": "", "purview_policy_status": "",
+             "purview_last_seen": "", "compliance": "Non-compliant", "report_date": RD},
+            # compliant device in this UNFILTERED export -> must be skipped
+            # (matches the real snapshot: 42/42 rows Compliant today)
+            {"intune_computer_name": "MAC-APAC-10", "business_unit_code": "APAC-Retail",
              "purview_configuration_status": "Updated", "purview_policy_status": "Updated",
              "purview_last_seen": "2026-06-29", "compliance": "Compliant", "report_date": RD},
         ])
@@ -1632,6 +1771,7 @@ def generate_mock_data() -> None:
             {"Name": "MAC-AMS-22", "Serial number": "SN-M22", "Assigned to": "Smith, Robert", "Install Status": "Installed", "Operating System": "macOS 14.4"},
             {"Name": "WS-EMEA-014", "Serial number": "SN-E14", "Assigned to": "Lam, Wai Lok Kelvin", "Install Status": "Installed", "Operating System": "Windows 11 24H2"},
             {"Name": "WS-APAC-005", "Serial number": "SN-A5", "Assigned to": "Terry-SP Lau", "Install Status": "Installed", "Operating System": "Windows 11 24H2"},
+            {"Name": "MAC-AMS-25", "Serial number": "SN-M25", "Assigned to": "Wong, Siu Ming", "Install Status": "Installed", "Operating System": "macOS 14.4"},
         ])
 
     # AD directory: DisplayName -> EmailAddress. Note the shorter convention and
