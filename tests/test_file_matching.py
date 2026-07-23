@@ -85,6 +85,61 @@ def test_ambiguous_filename_match_is_deterministic(data_dir):
     assert path1 == path2, "REGRESSION: repeated calls resolved to different files"
 
 
+# ===========================================================================
+# Dated-file tie-break - a real, now-observed case: a newer weekly export
+# (e.g. 20260715) can land in data/ before an older one (e.g. 20260703) of
+# the same report is cleaned out. Plain alphabetically-first (the rule
+# above, for UNDATED ambiguous matches) would silently pick the OLDER file,
+# since ISO-style YYYYMMDD prefixes sort ascending - exactly the wrong
+# direction. See _pick_latest_dated().
+# ===========================================================================
+
+def test_ambiguous_dated_files_resolves_to_the_newer_export(data_dir, capsys):
+    """The exact real scenario this exists for: two dated copies of the same
+    DLP export sitting in data/ together. Must resolve to the NEWER one, not
+    the alphabetically-first (= chronologically OLDEST, for ascending
+    YYYYMMDD prefixes) one the plain ambiguity rule would otherwise pick."""
+    _write_blank_xlsx(data_dir / "20260703_AIAGO-17. Workstation Security Agent Deployment-DLP.xlsx")
+    _write_blank_xlsx(data_dir / "20260715_AIAGO-17. Workstation Security Agent Deployment-DLP.xlsx")
+
+    path, sheet = cnc.find_dataset("dlp")
+
+    assert "20260715" in path, f"REGRESSION: expected the newer (20260715) export, got {path!r}"
+    assert sheet is None
+    out = capsys.readouterr().out
+    assert "latest dated" in out
+    assert "20260703" in out and "20260715" in out
+
+
+def test_pick_latest_dated_is_order_independent():
+    """Proves the selection is a genuine max-by-parsed-date, not "whichever
+    happens to be last in the list" - both orderings of the same two
+    candidates must resolve to the same (newer) one."""
+    older = "20260703_AIAGO-17. Workstation Security Agent Deployment-DLP.csv"
+    newer = "20260715_AIAGO-17. Workstation Security Agent Deployment-DLP.csv"
+
+    assert cnc._pick_latest_dated([older, newer]) == newer
+    assert cnc._pick_latest_dated([newer, older]) == newer
+
+
+def test_pick_latest_dated_prefers_any_dated_file_over_undated():
+    """A dated candidate must win over an undated one regardless of
+    alphabetical position - '0_Backup...' sorts before the dated file here
+    (digits '0' < '2' in ASCII), so this specifically rules out "just take
+    whichever is alphabetically first among the non-dated-looking ones"."""
+    undated_but_alphabetically_first = "0_Backup_DLP_Extra.csv"
+    dated = "20260715_AIAGO-17. Workstation Security Agent Deployment-DLP.csv"
+
+    assert cnc._pick_latest_dated([undated_but_alphabetically_first, dated]) == dated
+
+
+def test_pick_latest_dated_falls_back_to_first_when_none_dated():
+    """No candidate carries a recognizable date prefix -> falls back to the
+    existing, already-tested alphabetically-first behavior, unchanged."""
+    matches = ["Alpha_DLP_Extra.xlsx", "Beta_DLP_Extra.xlsx"]
+    assert cnc._pick_latest_dated(matches) == "Alpha_DLP_Extra.xlsx"
+
+
 def test_ambiguous_match_prints_a_warning(data_dir, capsys):
     """More than one candidate for the same keyword must be surfaced, not
     silently resolved - a human should notice two reports (or an unrelated

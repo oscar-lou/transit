@@ -51,6 +51,7 @@ import html
 import io
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -1022,6 +1023,41 @@ def _list_sheets(name: str) -> list:
 # the input actually took.
 # ===========================================================================
 
+_LEADING_DATE_RE = re.compile(r"^(\d{8})")
+
+
+def _leading_date_key(filename: str):
+    """-> the int value of a leading YYYYMMDD date prefix real report
+    exports carry (e.g. '20260715_AIAGO-17...', '20260715-AIAGO-19...'), or
+    None if the filename doesn't start with 8 digits at all (e.g.
+    'AIAGO_Workstation_CS.xlsx', or a test fixture like
+    'Alpha_DLP_Extra.xlsx'). Parsed as an int, not compared as a string, so
+    this is the actual date value - not, say, '20260715' being treated as
+    "less than" some unrelated 9-digit prefix."""
+    m = _LEADING_DATE_RE.match(os.path.basename(filename))
+    return int(m.group(1)) if m else None
+
+
+def _pick_latest_dated(matches: list) -> str:
+    """Tie-breaker for find_dataset() when more than one file matches the
+    same keyword. A real, now-observed case: successive weekly exports of
+    the same report (e.g. DLP, Zapp) can sit in data/ at once - a 20260703
+    copy alongside a 20260715 one - since old exports aren't necessarily
+    cleaned out before the next one lands. Prefers the candidate with the
+    LATEST such date, compared as an integer - the same "parse and compare
+    the actual number, don't string-sort it" principle SharePointDataSource's
+    folder discovery uses, for the same reason (e.g. a 202607 prefix must
+    not lose to some unrelated string that happens to sort later). Falls
+    back to `matches[0]` (already alphabetically-first, since callers build
+    `matches` from a sorted listing) when none of the candidates carry a
+    recognizable date prefix, leaving that already-tested, deterministic
+    behavior unchanged for undated ambiguous matches."""
+    dated = [(m, _leading_date_key(m)) for m in matches]
+    if not any(key is not None for _, key in dated):
+        return matches[0]
+    return max(dated, key=lambda pair: (pair[1] is not None, pair[1] or 0))[0]
+
+
 def find_dataset(stem_keyword: str):
     """-> (filename, sheet_name_or_None) for the match, else None. `filename`
     is a logical name within the active DataSource (see _get_data_source()),
@@ -1032,15 +1068,21 @@ def find_dataset(stem_keyword: str):
     timestamp/ticket prefixes this needs to see through. That looseness has a
     real cost: it can false-positive on an unrelated file/sheet that happens
     to contain the same keyword (e.g. 'dlp' matching a stray meeting-notes
-    file). Two things keep that from being a silent, unreproducible surprise:
+    file). Several things keep that from being a silent, unreproducible
+    surprise:
       - candidates are scanned in SORTED order, not whatever order the
         DataSource happens to return (which, for LocalDataSource, mirrors
         the filesystem/OS-dependent, not-guaranteed-stable os.listdir()
         order), so the same input directory always resolves the same way.
-      - if MORE THAN ONE file or sheet matches the same keyword, that's
-        printed as a warning naming every candidate, even though (to keep
-        existing single-match callers working unchanged) the first one is
-        still used automatically.
+      - if MORE THAN ONE file matches the same keyword, that's printed as a
+        warning naming every candidate. The one actually used is the
+        latest-dated candidate if any of them carry a leading YYYYMMDD
+        prefix - see _pick_latest_dated() - compared as an integer, never a
+        string; otherwise (no candidate has a recognizable date prefix) it
+        falls back to the alphabetically-first one, same as before. Sheet-
+        tab matches (inside a multi-tab workbook) keep the plain
+        alphabetically-first rule unconditionally - there's no evidence
+        sheet-tab names use this dated-export naming convention at all.
     This does NOT solve the other real risk - a renamed report simply
     matching nothing and silently vanishing - which is why validate_headers()
     surfaces every "no matching file or sheet found" into main()'s end-of-run
@@ -1064,10 +1106,14 @@ def find_dataset(stem_keyword: str):
 
     if filename_matches:
         if len(filename_matches) > 1:
-            others = ", ".join(filename_matches[1:])
+            chosen = _pick_latest_dated(filename_matches)
+            others = ", ".join(f for f in filename_matches if f != chosen)
+            why = "latest dated" if _leading_date_key(chosen) is not None else "alphabetically first"
             print(f"  ! '{stem_keyword}' matches {len(filename_matches)} files in "
-                  f"'{DATA_DIR}/' - using {filename_matches[0]}, ignoring: {others}")
-        return filename_matches[0], None
+                  f"'{DATA_DIR}/' - using {chosen} ({why}), ignoring: {others}")
+        else:
+            chosen = filename_matches[0]
+        return chosen, None
 
     # 2. no filename matched -> look for a matching TAB inside every workbook.
     # Sheet tabs likely won't carry the "aiago_" file-prefix, so compare with
